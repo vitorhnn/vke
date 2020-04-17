@@ -78,7 +78,9 @@ impl Application {
             .application_version(vk::make_version(0, 1, 0))
             .api_version(vk::make_version(1, 1, 0));
 
-        let layers = if Application::are_validation_layers_supported(&entry)? && Application::should_use_validation_layers() {
+        let layers = if Application::are_validation_layers_supported(&entry)?
+            && Application::should_use_validation_layers()
+        {
             vec![VALIDATION_LAYER_NAME.as_ptr()]
         } else {
             vec![]
@@ -174,7 +176,8 @@ impl Application {
             .map::<Result<FrameResources, Box<dyn Error>>, _>(|_| {
                 let semaphore_create_info = vk::SemaphoreCreateInfo::builder();
 
-                let fence_create_info = vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED);
+                let fence_create_info =
+                    vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED);
 
                 let image_available =
                     unsafe { device.create_semaphore(&semaphore_create_info, None)? };
@@ -187,10 +190,8 @@ impl Application {
                     .level(vk::CommandBufferLevel::PRIMARY)
                     .command_buffer_count(1);
 
-                let command_buffers = unsafe {
-                    device
-                        .allocate_command_buffers(&command_buffer_alloc_info)?
-                };
+                let command_buffers =
+                    unsafe { device.allocate_command_buffers(&command_buffer_alloc_info)? };
 
                 let command_buffer = command_buffers[0];
 
@@ -240,7 +241,8 @@ impl Application {
                     .height(swapchain_extent.height)
                     .layers(1);
 
-                let framebuffer = unsafe { device.create_framebuffer(&framebuffer_create_info, None) }?;
+                let framebuffer =
+                    unsafe { device.create_framebuffer(&framebuffer_create_info, None) }?;
 
                 Ok(ImageResources {
                     framebuffer,
@@ -604,7 +606,7 @@ image count: {:#?},
     fn draw(&mut self) -> Result<(), Box<dyn Error>> {
         let wait_fences = [self.frame_resources[self.current_frame].fence];
 
-        unsafe { 
+        unsafe {
             self.device.wait_for_fences(&wait_fences, true, u64::MAX)?;
         }
 
@@ -622,12 +624,16 @@ image count: {:#?},
             unsafe { self.device.wait_for_fences(&wait_fences, true, u64::MAX)? };
         }
 
-        self.image_resources[image_index as usize].fence = self.frame_resources[self.current_frame].fence;
+        self.image_resources[image_index as usize].fence =
+            self.frame_resources[self.current_frame].fence;
 
         let command_buffer = self.frame_resources[self.current_frame].command_buffer;
 
         unsafe {
-            self.device.reset_command_buffer(command_buffer, vk::CommandBufferResetFlags::RELEASE_RESOURCES)?;
+            self.device.reset_command_buffer(
+                command_buffer,
+                vk::CommandBufferResetFlags::RELEASE_RESOURCES,
+            )?;
             self.device
                 .begin_command_buffer(command_buffer, &vk::CommandBufferBeginInfo::builder())?;
         }
@@ -677,8 +683,11 @@ image count: {:#?},
 
         unsafe {
             self.device.reset_fences(&wait_fences)?;
-            self.device
-                .queue_submit(self.queue, &submits, self.frame_resources[self.current_frame].fence)?
+            self.device.queue_submit(
+                self.queue,
+                &submits,
+                self.frame_resources[self.current_frame].fence,
+            )?
         };
 
         let swapchains = [self.swapchain];
@@ -723,7 +732,8 @@ impl Drop for Application {
             self.device.destroy_command_pool(self.command_pool, None);
 
             for image_resources in &self.image_resources {
-                self.device.destroy_framebuffer(image_resources.framebuffer, None);
+                self.device
+                    .destroy_framebuffer(image_resources.framebuffer, None);
                 self.device
                     .destroy_image_view(image_resources.image_view, None);
             }
