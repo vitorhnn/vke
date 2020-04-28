@@ -430,6 +430,7 @@ name = "vke"
 version = "0.1.0"
 dependencies = [
  "ash",
+ "memoffset",
  "sdl2",
  "specs",
 ]

@@ -12,11 +12,12 @@ use ash::{
     Device, Entry, Instance,
 };
 
-use sdl2;
 use sdl2::event::Event;
 
 use std::error::Error;
 use std::ffi::CStr;
+
+use memoffset::offset_of;
 
 // kinda lifted from DXVK's Presenter
 struct FrameResources {
@@ -39,6 +40,7 @@ struct Application {
     entry: Entry,
     instance: Instance,
     device: Device,
+    device_memory_properties: vk::PhysicalDeviceMemoryProperties,
     surface: vk::SurfaceKHR,
     surface_loader: Surface,
     swapchain: vk::SwapchainKHR,
@@ -50,18 +52,99 @@ struct Application {
     pipeline: vk::Pipeline,
     render_pass: vk::RenderPass,
     command_pool: vk::CommandPool,
-    queue: vk::Queue,
+    graphics_queue: vk::Queue,
+    transfer_queue: vk::Queue,
     image_count: u32,
     current_frame: usize,
+    vertex_buffer: vk::Buffer,
+    vertex_buffer_memory: vk::DeviceMemory,
 }
 
-const VALIDATION_LAYER_NAME: &'static CStr =
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct Vertex {
+    pos: [f32; 2],
+    color: [f32; 3],
+}
+
+/// Returned by pick_vk_device. Contains the selected device and the index of the queue families
+/// we're going to use for operations. We prefer dedicated queue families but fallback to the same queue family if needed
+struct SelectedDeviceInfo {
+    device: vk::PhysicalDevice,
+    // we make the (currently) reasonable assumption that we can present from the graphics queue
+    graphics_family: u32,
+    transfer_family: u32,
+}
+
+impl Vertex {
+    fn get_binding_descriptor() -> vk::VertexInputBindingDescription {
+        vk::VertexInputBindingDescription {
+            binding: 0,
+            stride: std::mem::size_of::<Self>() as u32,
+            input_rate: vk::VertexInputRate::VERTEX,
+        }
+    }
+
+    fn get_attribute_descriptors() -> [vk::VertexInputAttributeDescription; 2] {
+        [
+            vk::VertexInputAttributeDescription {
+                binding: 0,
+                location: 0,
+                format: vk::Format::R32G32_SFLOAT,
+                offset: offset_of!(Vertex, pos) as u32,
+            },
+            vk::VertexInputAttributeDescription {
+                binding: 0,
+                location: 1,
+                format: vk::Format::R32G32B32_SFLOAT,
+                offset: offset_of!(Vertex, color) as u32,
+            },
+        ]
+    }
+}
+
+// stolen from ash
+pub fn find_memorytype_index(
+    memory_req: &vk::MemoryRequirements,
+    memory_prop: &vk::PhysicalDeviceMemoryProperties,
+    flags: vk::MemoryPropertyFlags,
+) -> Option<u32> {
+    // Try to find an exactly matching memory flag
+    let best_suitable_index =
+        find_memorytype_index_f(memory_req, memory_prop, flags, |property_flags, flags| {
+            property_flags == flags
+        });
+    if best_suitable_index.is_some() {
+        //return best_suitable_index;
+    }
+    // Otherwise find a memory flag that works
+    find_memorytype_index_f(memory_req, memory_prop, flags, |property_flags, flags| {
+        property_flags & flags == flags
+    })
+}
+
+pub fn find_memorytype_index_f<F: Fn(vk::MemoryPropertyFlags, vk::MemoryPropertyFlags) -> bool>(
+    memory_req: &vk::MemoryRequirements,
+    memory_prop: &vk::PhysicalDeviceMemoryProperties,
+    flags: vk::MemoryPropertyFlags,
+    f: F,
+) -> Option<u32> {
+    let mut memory_type_bits = memory_req.memory_type_bits;
+    for (index, ref memory_type) in memory_prop.memory_types.iter().enumerate() {
+        if memory_type_bits & 1 == 1 && f(memory_type.property_flags, flags) {
+            return Some(index as u32);
+        }
+        memory_type_bits >>= 1;
+    }
+    None
+}
+
+const VALIDATION_LAYER_NAME: &CStr =
     unsafe { CStr::from_bytes_with_nul_unchecked(b"VK_LAYER_KHRONOS_validation\0") };
 
-const APPLICATION_NAME: &'static CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"vke\0") };
+const APPLICATION_NAME: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"vke\0") };
 
-const SHADER_MAIN_FN_NAME: &'static CStr =
-    unsafe { CStr::from_bytes_with_nul_unchecked(b"main\0") };
+const SHADER_MAIN_FN_NAME: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"main\0") };
 
 const FRAMES_IN_FLIGHT: usize = 3;
 
@@ -108,18 +191,28 @@ impl Application {
 
         let surface_loader = Surface::new(&entry, &instance);
 
-        let physical_device = Application::pick_vk_device(&instance, &surface_loader, &surface)?;
+        let physical_device = Application::pick_vk_device(&instance, &surface_loader, surface)?;
 
-        let (physical_device, queue_family_index) =
-            physical_device.expect("no suitable vulkan device");
+        let selected_device_info = physical_device.expect("no suitable vulkan device");
+
+        let physical_device = selected_device_info.device;
+        let graphics_queue_family_index = selected_device_info.graphics_family;
+        let transfer_queue_family_index = selected_device_info.transfer_family;
 
         let priorities = [1.0];
 
-        let create_queue_info_builder = vk::DeviceQueueCreateInfo::builder()
-            .queue_family_index(queue_family_index as u32)
+        let create_graphics_queue_info_builder = vk::DeviceQueueCreateInfo::builder()
+            .queue_family_index(graphics_queue_family_index)
             .queue_priorities(&priorities);
 
-        let queues = [create_queue_info_builder.build()];
+        let create_transfer_queue_info_builder = vk::DeviceQueueCreateInfo::builder()
+            .queue_family_index(transfer_queue_family_index)
+            .queue_priorities(&priorities);
+
+        let queues = [
+            create_graphics_queue_info_builder.build(),
+            create_transfer_queue_info_builder.build(),
+        ];
 
         let device_features_builder = vk::PhysicalDeviceFeatures::builder();
 
@@ -134,7 +227,9 @@ impl Application {
         let device =
             unsafe { instance.create_device(physical_device, &create_device_info_builder, None)? };
 
-        let queue = unsafe { device.get_device_queue(queue_family_index as u32, 0) };
+        let graphics_queue = unsafe { device.get_device_queue(graphics_queue_family_index, 0) };
+
+        let transfer_queue = unsafe { device.get_device_queue(transfer_queue_family_index, 0) };
 
         let surface_capabilities = unsafe {
             surface_loader.get_physical_device_surface_capabilities(physical_device, surface)?
@@ -165,7 +260,7 @@ impl Application {
         let present_images = unsafe { swapchain_loader.get_swapchain_images(swapchain)? };
 
         let command_pool_create_info = vk::CommandPoolCreateInfo {
-            queue_family_index: queue_family_index as u32,
+            queue_family_index: graphics_queue_family_index as u32,
             flags: vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
             ..Default::default()
         };
@@ -207,7 +302,7 @@ impl Application {
         let render_pass = Application::create_render_pass(&device)?;
 
         let (pipeline_layout, pipeline) =
-            Application::create_graphics_pipeline(&device, swapchain_extent, &render_pass)?;
+            Application::create_graphics_pipeline(&device, swapchain_extent, render_pass)?;
 
         let image_resources: Vec<ImageResources> = present_images
             .iter()
@@ -252,6 +347,62 @@ impl Application {
             })
             .collect::<Result<_, _>>()?;
 
+        let vertices = [
+            Vertex {
+                pos: [0.0, -0.5],
+                color: [1.0, 0.0, 0.0],
+            },
+            Vertex {
+                pos: [0.5, 0.5],
+                color: [0.0, 1.0, 0.0],
+            },
+            Vertex {
+                pos: [-0.5, 0.5],
+                color: [0.0, 0.0, 1.0],
+            },
+        ];
+
+        let device_memory_properties =
+            unsafe { instance.get_physical_device_memory_properties(physical_device) };
+        
+        let buffer_size = std::mem::size_of_val(&vertices) as u64;
+
+        let (staging_buffer, staging_buffer_memory) = Application::create_buffer(
+            &device,
+            buffer_size,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            device_memory_properties,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            vk::SharingMode::EXCLUSIVE,
+        )?;
+
+        let (vertex_buffer, vertex_buffer_memory) = Application::create_buffer(
+            &device,
+            buffer_size,
+            vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            device_memory_properties,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL, vk::SharingMode::EXCLUSIVE)?;
+
+        unsafe {
+            let mapped = device.map_memory(
+                staging_buffer_memory,
+                0,
+                buffer_size,
+                vk::MemoryMapFlags::empty(),
+            )?;
+
+            {
+                let slice = std::slice::from_raw_parts_mut(
+                    mapped as *mut Vertex,
+                    buffer_size as usize / std::mem::size_of::<Vertex>(),
+                );
+
+                slice.copy_from_slice(&vertices);
+            }
+
+            device.unmap_memory(staging_buffer_memory);
+        }
+
         let app = Self {
             image_count: desired_image_count,
             current_frame: 0,
@@ -261,6 +412,7 @@ impl Application {
             entry,
             instance,
             device,
+            device_memory_properties,
             surface,
             surface_loader,
             swapchain,
@@ -272,7 +424,10 @@ impl Application {
             pipeline_layout,
             pipeline,
             command_pool,
-            queue,
+            graphics_queue,
+            transfer_queue,
+            vertex_buffer,
+            vertex_buffer_memory,
         };
 
         println!(
@@ -281,13 +436,52 @@ VKe: application created
 format: {:#?},
 buffer size: {:#?},
 image count: {:#?},
+graphics queue family index: {:#?},
+tranfer queue family index: {:#?},
             ",
             swapchain_create_info.image_format,
             swapchain_extent,
             present_images.len(),
+            graphics_queue_family_index,
+            transfer_queue_family_index
         );
 
         Ok(app)
+    }
+
+    fn create_buffer(
+        device: &Device,
+        device_size: vk::DeviceSize,
+        usage_flags: vk::BufferUsageFlags,
+        device_props: vk::PhysicalDeviceMemoryProperties,
+        properties: vk::MemoryPropertyFlags,
+        sharing_mode: vk::SharingMode,
+    ) -> Result<(vk::Buffer, vk::DeviceMemory), Box<dyn Error>> {
+        let buffer_create_info = vk::BufferCreateInfo::builder()
+            .size(device_size)
+            .usage(usage_flags)
+            .sharing_mode(sharing_mode);
+
+        let buffer = unsafe { device.create_buffer(&buffer_create_info, None)? };
+
+        let memory_requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
+
+        let memory_allocate_info = vk::MemoryAllocateInfo::builder()
+            .allocation_size(memory_requirements.size)
+            .memory_type_index(
+                find_memorytype_index(
+                    &memory_requirements,
+                    &device_props,
+                    properties,
+                )
+                .expect("no suitable memory types"),
+            );
+
+        let buffer_memory = unsafe { device.allocate_memory(&memory_allocate_info, None)? };
+
+        unsafe { device.bind_buffer_memory(buffer, buffer_memory, 0)? };
+
+        Ok((buffer, buffer_memory))
     }
 
     fn create_shader_module(
@@ -344,7 +538,7 @@ image count: {:#?},
     fn create_graphics_pipeline(
         device: &Device,
         swapchain_extent: vk::Extent2D,
-        render_pass: &vk::RenderPass,
+        render_pass: vk::RenderPass,
     ) -> Result<(vk::PipelineLayout, vk::Pipeline), Box<dyn Error>> {
         let raw_vs = include_bytes!("../vert.spv");
         let raw_fs = include_bytes!("../frag.spv");
@@ -369,7 +563,12 @@ image count: {:#?},
 
         let stages = [vs_stage_info, fs_stage_info];
 
-        let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::builder();
+        let binding_descriptors = [Vertex::get_binding_descriptor()];
+        let attribute_descriptors = Vertex::get_attribute_descriptors();
+
+        let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::builder()
+            .vertex_binding_descriptions(&binding_descriptors)
+            .vertex_attribute_descriptions(&attribute_descriptors);
 
         let input_assembly_info = vk::PipelineInputAssemblyStateCreateInfo::builder()
             .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
@@ -435,7 +634,7 @@ image count: {:#?},
             .multisample_state(&multisampler_state)
             .color_blend_state(&color_blend_state)
             .layout(pipeline_layout)
-            .render_pass(*render_pass)
+            .render_pass(render_pass)
             .subpass(0)
             .build()];
 
@@ -500,8 +699,8 @@ image count: {:#?},
     ) -> Result<vk::Extent2D, Box<dyn Error>> {
         Ok(match surface_capabilities.current_extent.width {
             std::u32::MAX => vk::Extent2D {
-                width: 800,
-                height: 600,
+                width: 1600,
+                height: 900,
             },
             _ => surface_capabilities.current_extent,
         })
@@ -510,68 +709,107 @@ image count: {:#?},
     fn pick_vk_device(
         instance: &Instance,
         surface_loader: &Surface,
-        surface: &vk::SurfaceKHR,
-    ) -> Result<Option<(vk::PhysicalDevice, usize)>, Box<dyn Error>> {
-        let is_device_suitable =
-            |device: &vk::PhysicalDevice| -> Result<Option<usize>, Box<dyn Error>> {
-                unsafe {
-                    let props = instance.get_physical_device_properties(*device);
-                    let queues = instance.get_physical_device_queue_family_properties(*device);
+        surface: vk::SurfaceKHR,
+    ) -> Result<Option<SelectedDeviceInfo>, Box<dyn Error>> {
+        let is_device_suitable = |device: &vk::PhysicalDevice| -> Result<bool, Box<dyn Error>> {
+            unsafe {
+                let props = instance.get_physical_device_properties(*device);
 
-                    let surface_formats =
-                        surface_loader.get_physical_device_surface_formats(*device, *surface)?;
-                    let surface_present_modes = surface_loader
-                        .get_physical_device_surface_present_modes(*device, *surface)?;
+                let surface_formats =
+                    surface_loader.get_physical_device_surface_formats(*device, surface)?;
+                let surface_present_modes =
+                    surface_loader.get_physical_device_surface_present_modes(*device, surface)?;
 
-                    let queue_index = queues
-                        .into_iter()
-                        .enumerate()
-                        .try_find::<_, Box<dyn Error>, _>(|(index, queue_properties)| {
-                            Ok(queue_properties
-                                .queue_flags
-                                .contains(vk::QueueFlags::GRAPHICS)
-                                && surface_loader.get_physical_device_surface_support(
-                                    *device,
-                                    *index as u32,
-                                    *surface,
-                                )?)
-                        })?
-                        .map(|(index, _)| index);
+                let suitable_swapchain_format = surface_formats.into_iter().any(|format| {
+                    format.format == vk::Format::B8G8R8A8_SRGB
+                        && format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+                });
 
-                    let suitable_swapchain_format = surface_formats.into_iter().any(|format| {
-                        format.format == vk::Format::B8G8R8A8_SRGB
-                            && format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
-                    });
+                let suitable_swapchain_present_mode = surface_present_modes
+                    .into_iter()
+                    .any(|present_mode| present_mode == vk::PresentModeKHR::FIFO_RELAXED);
 
-                    let suitable_swapchain_present_mode = surface_present_modes
-                        .into_iter()
-                        .any(|present_mode| present_mode == vk::PresentModeKHR::FIFO_RELAXED);
+                Ok((props.device_type == vk::PhysicalDeviceType::DISCRETE_GPU
+                    || props.device_type == vk::PhysicalDeviceType::INTEGRATED_GPU)
+                    && suitable_swapchain_format
+                    && suitable_swapchain_present_mode)
+            }
+        };
 
-                    if (props.device_type == vk::PhysicalDeviceType::DISCRETE_GPU
-                        || props.device_type == vk::PhysicalDeviceType::INTEGRATED_GPU)
-                        && suitable_swapchain_format
-                        && suitable_swapchain_present_mode
-                    {
-                        Ok(queue_index)
-                    } else {
-                        Ok(None)
-                    }
-                }
-            };
+        fn pick_queue(
+            queues: &[vk::QueueFamilyProperties],
+            is_optimal: impl Fn(vk::QueueFlags) -> bool,
+            is_acceptable: impl Fn(vk::QueueFlags) -> bool,
+        ) -> Option<u32> {
+            // try to find an optimal family
+            let optimal = queues
+                .iter()
+                .enumerate()
+                .find(|(_, queue_properties)| is_optimal(queue_properties.queue_flags))
+                .map(|(index, _)| index as u32);
+
+            if optimal.is_some() {
+                return optimal;
+            }
+
+            // just find something
+            queues
+                .iter()
+                .enumerate()
+                .find(|(_, queue_properties)| is_acceptable(queue_properties.queue_flags))
+                .map(|(index, _)| index as u32)
+        }
 
         let devices = unsafe { instance.enumerate_physical_devices()? };
 
-        let mut device_queue_pair = None;
-
         for device in devices {
-            let maybe_queue = is_device_suitable(&device)?;
+            if is_device_suitable(&device)? {
+                let queues =
+                    unsafe { instance.get_physical_device_queue_family_properties(device) };
 
-            if let Some(queue) = maybe_queue {
-                device_queue_pair = Some((device, queue));
+                // not quite sure if there's any benefit from a dedicated graphics queue...
+                // so just pick whatever
+                let maybe_graphics_queue_index = queues
+                    .iter()
+                    .enumerate()
+                    .try_find::<_, Box<dyn Error>, _>(|(index, queue_properties)| {
+                        Ok(queue_properties
+                            .queue_flags
+                            .contains(vk::QueueFlags::GRAPHICS)
+                            && unsafe {
+                                surface_loader.get_physical_device_surface_support(
+                                    device,
+                                    *index as u32,
+                                    surface,
+                                )?
+                            })
+                    })?
+                    .map(|(index, _)| index as u32);
+
+                let maybe_transfer_queue_index = pick_queue(
+                    &queues,
+                    |flags| {
+                        flags.contains(vk::QueueFlags::TRANSFER)
+                            && !flags.contains(vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE)
+                    },
+                    |flags| flags.contains(vk::QueueFlags::TRANSFER),
+                );
+
+                let result = maybe_graphics_queue_index.and_then(|graphics_family| {
+                    maybe_transfer_queue_index.map(|transfer_family| SelectedDeviceInfo {
+                        device,
+                        graphics_family,
+                        transfer_family,
+                    })
+                });
+
+                if result.is_some() {
+                    return Ok(result);
+                }
             }
         }
 
-        Ok(device_queue_pair)
+        Ok(None)
     }
 
     fn are_validation_layers_supported(entry: &Entry) -> Result<bool, Box<dyn Error>> {
@@ -664,6 +902,13 @@ image count: {:#?},
                 vk::PipelineBindPoint::GRAPHICS,
                 self.pipeline,
             );
+
+            let vertex_buffers = [self.vertex_buffer];
+            let offsets = [0];
+
+            self.device
+                .cmd_bind_vertex_buffers(command_buffer, 0, &vertex_buffers, &offsets);
+
             self.device.cmd_draw(command_buffer, 3, 1, 0, 0);
             self.device.cmd_end_render_pass(command_buffer);
             self.device.end_command_buffer(command_buffer)?;
@@ -684,7 +929,7 @@ image count: {:#?},
         unsafe {
             self.device.reset_fences(&wait_fences)?;
             self.device.queue_submit(
-                self.queue,
+                self.graphics_queue,
                 &submits,
                 self.frame_resources[self.current_frame].fence,
             )?
@@ -700,7 +945,7 @@ image count: {:#?},
 
         unsafe {
             self.swapchain_loader
-                .queue_present(self.queue, &present_info)?;
+                .queue_present(self.graphics_queue, &present_info)?;
         }
 
         self.current_frame = (self.current_frame + 1) % FRAMES_IN_FLIGHT;
@@ -708,18 +953,17 @@ image count: {:#?},
         Ok(())
     }
 
-    fn should_use_validation_layers() -> bool {
-        if cfg!(debug_assertions) {
-            true
-        } else {
-            false
-        }
+    const fn should_use_validation_layers() -> bool {
+        cfg!(debug_assertions)
     }
 }
 
 impl Drop for Application {
     fn drop(&mut self) {
         unsafe {
+            self.device.destroy_buffer(self.vertex_buffer, None);
+            self.device.free_memory(self.vertex_buffer_memory, None);
+
             for frame_data in &self.frame_resources {
                 self.device
                     .destroy_semaphore(frame_data.image_available, None);
