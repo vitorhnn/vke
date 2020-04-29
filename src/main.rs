@@ -51,7 +51,8 @@ struct Application {
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
     render_pass: vk::RenderPass,
-    command_pool: vk::CommandPool,
+    graphics_command_pool: vk::CommandPool,
+    transfer_command_pool: vk::CommandPool,
     graphics_queue: vk::Queue,
     transfer_queue: vk::Queue,
     image_count: u32,
@@ -260,12 +261,20 @@ impl Application {
         let present_images = unsafe { swapchain_loader.get_swapchain_images(swapchain)? };
 
         let command_pool_create_info = vk::CommandPoolCreateInfo {
-            queue_family_index: graphics_queue_family_index as u32,
+            queue_family_index: graphics_queue_family_index,
             flags: vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
             ..Default::default()
         };
 
-        let command_pool = unsafe { device.create_command_pool(&command_pool_create_info, None)? };
+        let graphics_command_pool = unsafe { device.create_command_pool(&command_pool_create_info, None)? };
+
+        let command_pool_create_info = vk::CommandPoolCreateInfo {
+            queue_family_index: transfer_queue_family_index,
+            flags: vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+            ..Default::default()
+        };
+
+        let transfer_command_pool = unsafe { device.create_command_pool(&command_pool_create_info, None)? };
 
         let frame_resources: Vec<FrameResources> = (0..FRAMES_IN_FLIGHT)
             .map::<Result<FrameResources, Box<dyn Error>>, _>(|_| {
@@ -281,7 +290,7 @@ impl Application {
                 let fence = unsafe { device.create_fence(&fence_create_info, None)? };
 
                 let command_buffer_alloc_info = vk::CommandBufferAllocateInfo::builder()
-                    .command_pool(command_pool)
+                    .command_pool(graphics_command_pool)
                     .level(vk::CommandBufferLevel::PRIMARY)
                     .command_buffer_count(1);
 
@@ -364,7 +373,7 @@ impl Application {
 
         let device_memory_properties =
             unsafe { instance.get_physical_device_memory_properties(physical_device) };
-        
+
         let buffer_size = std::mem::size_of_val(&vertices) as u64;
 
         let (staging_buffer, staging_buffer_memory) = Application::create_buffer(
@@ -381,7 +390,9 @@ impl Application {
             buffer_size,
             vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
             device_memory_properties,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL, vk::SharingMode::EXCLUSIVE)?;
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            vk::SharingMode::EXCLUSIVE,
+        )?;
 
         unsafe {
             let mapped = device.map_memory(
@@ -401,6 +412,150 @@ impl Application {
             }
 
             device.unmap_memory(staging_buffer_memory);
+        }
+
+        // the following code assumes that we get a different transfer and graphics queue
+        // which is the case in my maxwell 2 gpu, but not in my work laptop
+        // hell, my work laptop is UMA, which is even easier
+
+        let command_buffer_alloc_info = vk::CommandBufferAllocateInfo::builder()
+            .command_pool(graphics_command_pool)
+            .command_buffer_count(1)
+            .level(vk::CommandBufferLevel::PRIMARY);
+
+        let graphics_buffers = unsafe { device.allocate_command_buffers(&command_buffer_alloc_info)? };
+
+        let command_buffer_alloc_info = vk::CommandBufferAllocateInfo::builder()
+            .command_pool(transfer_command_pool)
+            .command_buffer_count(1)
+            .level(vk::CommandBufferLevel::PRIMARY);
+
+        let transfer_buffers = unsafe { device.allocate_command_buffers(&command_buffer_alloc_info)? };
+
+        let graphics_queue_buffer = graphics_buffers[0];
+        let transfer_queue_buffer = transfer_buffers[0];
+
+        let begin_info = vk::CommandBufferBeginInfo::builder()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+        let memory_barriers = [
+            vk::BufferMemoryBarrier {
+                buffer: vertex_buffer,
+                src_access_mask: vk::AccessFlags::TRANSFER_WRITE,
+                dst_access_mask: vk::AccessFlags::empty(),
+                src_queue_family_index: transfer_queue_family_index,
+                dst_queue_family_index: graphics_queue_family_index,
+                offset: 0,
+                size: vk::WHOLE_SIZE,
+                ..Default::default()
+            },
+            vk::BufferMemoryBarrier {
+                buffer: vertex_buffer,
+                src_access_mask: vk::AccessFlags::empty(),
+                dst_access_mask: vk::AccessFlags::VERTEX_ATTRIBUTE_READ,
+                src_queue_family_index: transfer_queue_family_index,
+                dst_queue_family_index: graphics_queue_family_index,
+                offset: 0,
+                size: vk::WHOLE_SIZE,
+                ..Default::default()
+            },
+        ];
+
+        unsafe {
+            device.begin_command_buffer(transfer_queue_buffer, &begin_info)?;
+
+            let regions = [vk::BufferCopy {
+                dst_offset: 0,
+                src_offset: 0,
+                size: buffer_size,
+            }];
+
+            device.cmd_copy_buffer(
+                transfer_queue_buffer,
+                staging_buffer,
+                vertex_buffer,
+                &regions,
+            );
+
+            device.cmd_pipeline_barrier(
+                transfer_queue_buffer,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                vk::DependencyFlags::empty(),
+                &[],
+                &memory_barriers[..1],
+                &[],
+            );
+
+            device.end_command_buffer(transfer_queue_buffer)?;
+        }
+
+        unsafe {
+            device.begin_command_buffer(graphics_queue_buffer, &begin_info)?;
+
+            device.cmd_pipeline_barrier(
+                graphics_queue_buffer,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::VERTEX_INPUT,
+                vk::DependencyFlags::empty(),
+                &[],
+                &memory_barriers[1..],
+                &[],
+            );
+
+            device.end_command_buffer(graphics_queue_buffer)?;
+        }
+        let semaphore_create_info = vk::SemaphoreCreateInfo::builder();
+
+        let transfer_done_semaphore =
+            unsafe { device.create_semaphore(&semaphore_create_info, None)? };
+
+        let submitted_buffers = [transfer_queue_buffer];
+
+        let semaphores = [transfer_done_semaphore];
+
+        let submits = [vk::SubmitInfo::builder()
+            .command_buffers(&submitted_buffers)
+            .signal_semaphores(&semaphores)
+            .build()];
+        
+        let fence_create_info = vk::FenceCreateInfo::builder();
+
+        let transfer_done_fence = unsafe { device.create_fence(&fence_create_info, None)? };
+
+        unsafe {
+            device.queue_submit(transfer_queue, &submits, transfer_done_fence)?;
+        }
+
+        let submitted_buffers = [graphics_queue_buffer];
+        let wait_stages = [vk::PipelineStageFlags::VERTEX_INPUT];
+
+        let submits = [vk::SubmitInfo::builder()
+            .command_buffers(&submitted_buffers)
+            .wait_semaphores(&semaphores)
+            .wait_dst_stage_mask(&wait_stages)
+            .build()];
+
+        let graphics_done_fence = unsafe { device.create_fence(&fence_create_info, None)? };
+
+        unsafe {
+            device.queue_submit(graphics_queue, &submits, graphics_done_fence)?;
+        }
+
+        let wait_fences = [transfer_done_fence, graphics_done_fence];
+
+        unsafe {
+            device.wait_for_fences(&wait_fences, true, u64::MAX)?;
+
+            device.free_command_buffers(graphics_command_pool, &graphics_buffers);
+            device.free_command_buffers(transfer_command_pool, &transfer_buffers);
+            device.destroy_buffer(staging_buffer, None);
+            device.free_memory(staging_buffer_memory, None);
+
+            device.destroy_semaphore(transfer_done_semaphore, None);
+
+            device.destroy_fence(transfer_done_fence, None);
+            device.destroy_fence(graphics_done_fence, None);
         }
 
         let app = Self {
@@ -423,7 +578,8 @@ impl Application {
             render_pass,
             pipeline_layout,
             pipeline,
-            command_pool,
+            graphics_command_pool,
+            transfer_command_pool,
             graphics_queue,
             transfer_queue,
             vertex_buffer,
@@ -469,12 +625,8 @@ tranfer queue family index: {:#?},
         let memory_allocate_info = vk::MemoryAllocateInfo::builder()
             .allocation_size(memory_requirements.size)
             .memory_type_index(
-                find_memorytype_index(
-                    &memory_requirements,
-                    &device_props,
-                    properties,
-                )
-                .expect("no suitable memory types"),
+                find_memorytype_index(&memory_requirements, &device_props, properties)
+                    .expect("no suitable memory types"),
             );
 
         let buffer_memory = unsafe { device.allocate_memory(&memory_allocate_info, None)? };
@@ -973,7 +1125,8 @@ impl Drop for Application {
                 self.device.destroy_fence(frame_data.fence, None);
             }
 
-            self.device.destroy_command_pool(self.command_pool, None);
+            self.device.destroy_command_pool(self.transfer_command_pool, None);
+            self.device.destroy_command_pool(self.graphics_command_pool, None);
 
             for image_resources in &self.image_resources {
                 self.device
