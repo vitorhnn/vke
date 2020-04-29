@@ -116,7 +116,7 @@ pub fn find_memorytype_index(
             property_flags == flags
         });
     if best_suitable_index.is_some() {
-        //return best_suitable_index;
+        return best_suitable_index;
     }
     // Otherwise find a memory flag that works
     find_memorytype_index_f(memory_req, memory_prop, flags, |property_flags, flags| {
