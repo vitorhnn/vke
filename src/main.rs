@@ -266,7 +266,8 @@ impl Application {
             ..Default::default()
         };
 
-        let graphics_command_pool = unsafe { device.create_command_pool(&command_pool_create_info, None)? };
+        let graphics_command_pool =
+            unsafe { device.create_command_pool(&command_pool_create_info, None)? };
 
         let command_pool_create_info = vk::CommandPoolCreateInfo {
             queue_family_index: transfer_queue_family_index,
@@ -274,7 +275,8 @@ impl Application {
             ..Default::default()
         };
 
-        let transfer_command_pool = unsafe { device.create_command_pool(&command_pool_create_info, None)? };
+        let transfer_command_pool =
+            unsafe { device.create_command_pool(&command_pool_create_info, None)? };
 
         let frame_resources: Vec<FrameResources> = (0..FRAMES_IN_FLIGHT)
             .map::<Result<FrameResources, Box<dyn Error>>, _>(|_| {
@@ -423,14 +425,16 @@ impl Application {
             .command_buffer_count(1)
             .level(vk::CommandBufferLevel::PRIMARY);
 
-        let graphics_buffers = unsafe { device.allocate_command_buffers(&command_buffer_alloc_info)? };
+        let graphics_buffers =
+            unsafe { device.allocate_command_buffers(&command_buffer_alloc_info)? };
 
         let command_buffer_alloc_info = vk::CommandBufferAllocateInfo::builder()
             .command_pool(transfer_command_pool)
             .command_buffer_count(1)
             .level(vk::CommandBufferLevel::PRIMARY);
 
-        let transfer_buffers = unsafe { device.allocate_command_buffers(&command_buffer_alloc_info)? };
+        let transfer_buffers =
+            unsafe { device.allocate_command_buffers(&command_buffer_alloc_info)? };
 
         let graphics_queue_buffer = graphics_buffers[0];
         let transfer_queue_buffer = transfer_buffers[0];
@@ -518,7 +522,7 @@ impl Application {
             .command_buffers(&submitted_buffers)
             .signal_semaphores(&semaphores)
             .build()];
-        
+
         let fence_create_info = vk::FenceCreateInfo::builder();
 
         let transfer_done_fence = unsafe { device.create_fence(&fence_create_info, None)? };
@@ -1125,8 +1129,10 @@ impl Drop for Application {
                 self.device.destroy_fence(frame_data.fence, None);
             }
 
-            self.device.destroy_command_pool(self.transfer_command_pool, None);
-            self.device.destroy_command_pool(self.graphics_command_pool, None);
+            self.device
+                .destroy_command_pool(self.transfer_command_pool, None);
+            self.device
+                .destroy_command_pool(self.graphics_command_pool, None);
 
             for image_resources in &self.image_resources {
                 self.device
