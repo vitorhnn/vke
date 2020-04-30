@@ -59,6 +59,8 @@ struct Application {
     current_frame: usize,
     vertex_buffer: vk::Buffer,
     vertex_buffer_memory: vk::DeviceMemory,
+    index_buffer: vk::Buffer,
+    index_buffer_memory: vk::DeviceMemory,
 }
 
 #[repr(C)]
@@ -360,27 +362,34 @@ impl Application {
 
         let vertices = [
             Vertex {
-                pos: [0.0, -0.5],
+                pos: [-0.5, -0.5],
                 color: [1.0, 0.0, 0.0],
             },
             Vertex {
-                pos: [0.5, 0.5],
+                pos: [0.5, -0.5],
                 color: [0.0, 1.0, 0.0],
             },
             Vertex {
-                pos: [-0.5, 0.5],
+                pos: [0.5, 0.5],
                 color: [0.0, 0.0, 1.0],
             },
+            Vertex {
+                pos: [-0.5, 0.5],
+                color: [1.0, 1.0, 1.0],
+            },
         ];
+
+        let indices: [u16; 6] = [0, 1, 2, 2, 3, 0];
 
         let device_memory_properties =
             unsafe { instance.get_physical_device_memory_properties(physical_device) };
 
-        let buffer_size = std::mem::size_of_val(&vertices) as u64;
+        let vertex_buffer_size = std::mem::size_of_val(&vertices) as u64;
+        let index_buffer_size = std::mem::size_of_val(&indices) as u64;
 
         let (staging_buffer, staging_buffer_memory) = Application::create_buffer(
             &device,
-            buffer_size,
+            vertex_buffer_size + index_buffer_size,
             vk::BufferUsageFlags::TRANSFER_SRC,
             device_memory_properties,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
@@ -389,8 +398,17 @@ impl Application {
 
         let (vertex_buffer, vertex_buffer_memory) = Application::create_buffer(
             &device,
-            buffer_size,
+            vertex_buffer_size,
             vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            device_memory_properties,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            vk::SharingMode::EXCLUSIVE,
+        )?;
+
+        let (index_buffer, index_buffer_memory) = Application::create_buffer(
+            &device,
+            index_buffer_size,
+            vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
             device_memory_properties,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
             vk::SharingMode::EXCLUSIVE,
@@ -400,17 +418,26 @@ impl Application {
             let mapped = device.map_memory(
                 staging_buffer_memory,
                 0,
-                buffer_size,
+                vertex_buffer_size + index_buffer_size,
                 vk::MemoryMapFlags::empty(),
             )?;
 
             {
                 let slice = std::slice::from_raw_parts_mut(
                     mapped as *mut Vertex,
-                    buffer_size as usize / std::mem::size_of::<Vertex>(),
+                    vertex_buffer_size as usize / std::mem::size_of::<Vertex>(),
                 );
 
                 slice.copy_from_slice(&vertices);
+            }
+
+            {
+                let slice = std::slice::from_raw_parts_mut(
+                    mapped.add(vertex_buffer_size as usize) as *mut u16,
+                    index_buffer_size as usize / std::mem::size_of::<u16>(),
+                );
+
+                slice.copy_from_slice(&indices);
             }
 
             device.unmap_memory(staging_buffer_memory);
@@ -454,6 +481,16 @@ impl Application {
                 ..Default::default()
             },
             vk::BufferMemoryBarrier {
+                buffer: index_buffer,
+                src_access_mask: vk::AccessFlags::TRANSFER_WRITE,
+                dst_access_mask: vk::AccessFlags::empty(),
+                src_queue_family_index: transfer_queue_family_index,
+                dst_queue_family_index: graphics_queue_family_index,
+                offset: 0,
+                size: vk::WHOLE_SIZE,
+                ..Default::default()
+            },
+            vk::BufferMemoryBarrier {
                 buffer: vertex_buffer,
                 src_access_mask: vk::AccessFlags::empty(),
                 dst_access_mask: vk::AccessFlags::VERTEX_ATTRIBUTE_READ,
@@ -463,22 +500,46 @@ impl Application {
                 size: vk::WHOLE_SIZE,
                 ..Default::default()
             },
+            vk::BufferMemoryBarrier {
+                buffer: index_buffer,
+                src_access_mask: vk::AccessFlags::empty(),
+                dst_access_mask: vk::AccessFlags::INDEX_READ,
+                src_queue_family_index: transfer_queue_family_index,
+                dst_queue_family_index: graphics_queue_family_index,
+                offset: 0,
+                size: vk::WHOLE_SIZE,
+                ..Default::default()
+            }
         ];
 
         unsafe {
             device.begin_command_buffer(transfer_queue_buffer, &begin_info)?;
 
-            let regions = [vk::BufferCopy {
-                dst_offset: 0,
-                src_offset: 0,
-                size: buffer_size,
-            }];
+            let regions = [
+                vk::BufferCopy {
+                    dst_offset: 0,
+                    src_offset: 0,
+                    size: vertex_buffer_size,
+                },
+                vk::BufferCopy {
+                    dst_offset: 0,
+                    src_offset: vertex_buffer_size,
+                    size: index_buffer_size,
+                },
+            ];
 
             device.cmd_copy_buffer(
                 transfer_queue_buffer,
                 staging_buffer,
                 vertex_buffer,
-                &regions,
+                &regions[..1],
+            );
+
+            device.cmd_copy_buffer(
+                transfer_queue_buffer,
+                staging_buffer,
+                index_buffer,
+                &regions[1..],
             );
 
             device.cmd_pipeline_barrier(
@@ -487,7 +548,7 @@ impl Application {
                 vk::PipelineStageFlags::BOTTOM_OF_PIPE,
                 vk::DependencyFlags::empty(),
                 &[],
-                &memory_barriers[..1],
+                &memory_barriers[..2],
                 &[],
             );
 
@@ -503,7 +564,7 @@ impl Application {
                 vk::PipelineStageFlags::VERTEX_INPUT,
                 vk::DependencyFlags::empty(),
                 &[],
-                &memory_barriers[1..],
+                &memory_barriers[2..],
                 &[],
             );
 
@@ -588,6 +649,8 @@ impl Application {
             transfer_queue,
             vertex_buffer,
             vertex_buffer_memory,
+            index_buffer,
+            index_buffer_memory,
         };
 
         println!(
@@ -1065,7 +1128,9 @@ tranfer queue family index: {:#?},
             self.device
                 .cmd_bind_vertex_buffers(command_buffer, 0, &vertex_buffers, &offsets);
 
-            self.device.cmd_draw(command_buffer, 3, 1, 0, 0);
+            self.device.cmd_bind_index_buffer(command_buffer, self.index_buffer, 0, vk::IndexType::UINT16);
+
+            self.device.cmd_draw_indexed(command_buffer, 6, 1, 0, 0, 0);
             self.device.cmd_end_render_pass(command_buffer);
             self.device.end_command_buffer(command_buffer)?;
         }
@@ -1119,6 +1184,9 @@ impl Drop for Application {
         unsafe {
             self.device.destroy_buffer(self.vertex_buffer, None);
             self.device.free_memory(self.vertex_buffer_memory, None);
+
+            self.device.destroy_buffer(self.index_buffer, None);
+            self.device.free_memory(self.index_buffer_memory, None);
 
             for frame_data in &self.frame_resources {
                 self.device
