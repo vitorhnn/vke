@@ -262,6 +262,8 @@ impl Application {
 
         let present_images = unsafe { swapchain_loader.get_swapchain_images(swapchain)? };
 
+        let image_count = present_images.len() as u32;
+
         let command_pool_create_info = vk::CommandPoolCreateInfo {
             queue_family_index: graphics_queue_family_index,
             flags: vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
@@ -624,7 +626,7 @@ impl Application {
         }
 
         let app = Self {
-            image_count: desired_image_count,
+            image_count,
             current_frame: 0,
             sdl_ctx,
             sdl_video_ctx,
