@@ -19,12 +19,18 @@ use std::ffi::CStr;
 
 use memoffset::offset_of;
 
+use glam::{Mat4, Vec3};
+
 // kinda lifted from DXVK's Presenter
 struct FrameResources {
     image_available: vk::Semaphore,
     render_finished: vk::Semaphore,
     fence: vk::Fence,
     command_buffer: vk::CommandBuffer,
+    uniform_buffer: vk::Buffer,
+    uniform_buffer_memory: vk::DeviceMemory,
+    ubo_ptr: *mut Ubo,
+    descriptor_set: vk::DescriptorSet,
 }
 
 struct ImageResources {
@@ -50,6 +56,7 @@ struct Application {
     frame_resources: Vec<FrameResources>,
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
+    descriptor_set_layout: vk::DescriptorSetLayout,
     render_pass: vk::RenderPass,
     graphics_command_pool: vk::CommandPool,
     transfer_command_pool: vk::CommandPool,
@@ -61,6 +68,8 @@ struct Application {
     vertex_buffer_memory: vk::DeviceMemory,
     index_buffer: vk::Buffer,
     index_buffer_memory: vk::DeviceMemory,
+    descriptor_pool: vk::DescriptorPool,
+    frame_count: usize,
 }
 
 #[repr(C)]
@@ -68,6 +77,13 @@ struct Application {
 struct Vertex {
     pos: [f32; 2],
     color: [f32; 3],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone)]
+struct Ubo {
+    model_view: Mat4,
+    projection: Mat4,
 }
 
 /// Returned by pick_vk_device. Contains the selected device and the index of the queue families
@@ -202,6 +218,9 @@ impl Application {
         let graphics_queue_family_index = selected_device_info.graphics_family;
         let transfer_queue_family_index = selected_device_info.transfer_family;
 
+        let device_memory_properties =
+            unsafe { instance.get_physical_device_memory_properties(physical_device) };
+
         let priorities = [1.0];
 
         let create_graphics_queue_info_builder = vk::DeviceQueueCreateInfo::builder()
@@ -282,7 +301,7 @@ impl Application {
         let transfer_command_pool =
             unsafe { device.create_command_pool(&command_pool_create_info, None)? };
 
-        let frame_resources: Vec<FrameResources> = (0..FRAMES_IN_FLIGHT)
+        let mut frame_resources: Vec<FrameResources> = (0..FRAMES_IN_FLIGHT)
             .map::<Result<FrameResources, Box<dyn Error>>, _>(|_| {
                 let semaphore_create_info = vk::SemaphoreCreateInfo::builder();
 
@@ -305,18 +324,45 @@ impl Application {
 
                 let command_buffer = command_buffers[0];
 
+                let (uniform_buffer, uniform_buffer_memory) = Application::create_buffer(
+                    &device,
+                    std::mem::size_of::<Ubo>() as u64,
+                    vk::BufferUsageFlags::UNIFORM_BUFFER,
+                    device_memory_properties,
+                    vk::MemoryPropertyFlags::DEVICE_LOCAL
+                        | vk::MemoryPropertyFlags::HOST_VISIBLE
+                        | vk::MemoryPropertyFlags::HOST_COHERENT,
+                    vk::SharingMode::EXCLUSIVE,
+                )?;
+
+                // we're deviating from vulkan-tutorial here
+                // most modern gpus have some host visible, cached and device local memory
+                // this is called "persistent buffer mapping" in opengl parlance
+                let ubo_ptr = unsafe {
+                    device.map_memory(
+                        uniform_buffer_memory,
+                        0,
+                        std::mem::size_of::<Ubo>() as u64,
+                        vk::MemoryMapFlags::empty(),
+                    )?
+                } as *mut Ubo;
+
                 Ok(FrameResources {
                     image_available,
                     render_finished,
                     fence,
                     command_buffer,
+                    uniform_buffer,
+                    uniform_buffer_memory,
+                    ubo_ptr,
+                    descriptor_set: vk::DescriptorSet::null(),
                 })
             })
             .collect::<Result<_, _>>()?;
 
         let render_pass = Application::create_render_pass(&device)?;
 
-        let (pipeline_layout, pipeline) =
+        let (pipeline_layout, pipeline, descriptor_set_layout) =
             Application::create_graphics_pipeline(&device, swapchain_extent, render_pass)?;
 
         let image_resources: Vec<ImageResources> = present_images
@@ -382,9 +428,6 @@ impl Application {
         ];
 
         let indices: [u16; 6] = [0, 1, 2, 2, 3, 0];
-
-        let device_memory_properties =
-            unsafe { instance.get_physical_device_memory_properties(physical_device) };
 
         let vertex_buffer_size = std::mem::size_of_val(&vertices) as u64;
         let index_buffer_size = std::mem::size_of_val(&indices) as u64;
@@ -511,7 +554,7 @@ impl Application {
                 offset: 0,
                 size: vk::WHOLE_SIZE,
                 ..Default::default()
-            }
+            },
         ];
 
         unsafe {
@@ -625,6 +668,50 @@ impl Application {
             device.destroy_fence(graphics_done_fence, None);
         }
 
+        let pool_sizes = [vk::DescriptorPoolSize {
+            descriptor_count: FRAMES_IN_FLIGHT as u32,
+            ..Default::default()
+        }];
+
+        let pool_create_info = vk::DescriptorPoolCreateInfo::builder()
+            .pool_sizes(&pool_sizes)
+            .max_sets(FRAMES_IN_FLIGHT as u32);
+
+        let descriptor_pool = unsafe { device.create_descriptor_pool(&pool_create_info, None)? };
+
+        let set_layouts = vec![descriptor_set_layout; FRAMES_IN_FLIGHT];
+
+        let descriptor_set_alloc_info = vk::DescriptorSetAllocateInfo::builder()
+            .descriptor_pool(descriptor_pool)
+            .set_layouts(&set_layouts);
+
+        let sets = unsafe { device.allocate_descriptor_sets(&descriptor_set_alloc_info)? };
+
+        let writes: Vec<_> = sets
+            .iter()
+            .enumerate()
+            .map(|(idx, &set)| {
+                let frame = &mut frame_resources[idx];
+                frame.descriptor_set = set; // side effects, yey!
+
+                let buffer_infos = [vk::DescriptorBufferInfo {
+                    buffer: frame.uniform_buffer,
+                    offset: 0,
+                    range: std::mem::size_of::<Ubo>() as u64,
+                }];
+
+                vk::WriteDescriptorSet::builder()
+                    .dst_set(frame.descriptor_set)
+                    .dst_binding(0)
+                    .dst_array_element(0)
+                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                    .buffer_info(&buffer_infos)
+                    .build()
+            })
+            .collect();
+
+        unsafe { device.update_descriptor_sets(&writes, &[]) };
+
         let app = Self {
             image_count,
             current_frame: 0,
@@ -645,6 +732,7 @@ impl Application {
             render_pass,
             pipeline_layout,
             pipeline,
+            descriptor_set_layout,
             graphics_command_pool,
             transfer_command_pool,
             graphics_queue,
@@ -653,6 +741,8 @@ impl Application {
             vertex_buffer_memory,
             index_buffer,
             index_buffer_memory,
+            descriptor_pool,
+            frame_count: 0,
         };
 
         println!(
@@ -760,7 +850,7 @@ tranfer queue family index: {:#?},
         device: &Device,
         swapchain_extent: vk::Extent2D,
         render_pass: vk::RenderPass,
-    ) -> Result<(vk::PipelineLayout, vk::Pipeline), Box<dyn Error>> {
+    ) -> Result<(vk::PipelineLayout, vk::Pipeline, vk::DescriptorSetLayout), Box<dyn Error>> {
         let raw_vs = include_bytes!("../vert.spv");
         let raw_fs = include_bytes!("../frag.spv");
 
@@ -841,7 +931,23 @@ tranfer queue family index: {:#?},
             .logic_op_enable(false)
             .attachments(&color_blend_attachment_states);
 
-        let pipeline_layout_info = vk::PipelineLayoutCreateInfo::builder();
+        let layout_bindings = [vk::DescriptorSetLayoutBinding::builder()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::VERTEX)
+            .build()];
+
+        let layout_create_info =
+            vk::DescriptorSetLayoutCreateInfo::builder().bindings(&layout_bindings);
+
+        let descriptor_set_layout =
+            unsafe { device.create_descriptor_set_layout(&layout_create_info, None)? };
+
+        let set_layouts = [descriptor_set_layout];
+
+        let pipeline_layout_info =
+            vk::PipelineLayoutCreateInfo::builder().set_layouts(&set_layouts);
 
         let pipeline_layout =
             unsafe { device.create_pipeline_layout(&pipeline_layout_info, None)? };
@@ -872,7 +978,7 @@ tranfer queue family index: {:#?},
             device.destroy_shader_module(vs_module, None);
         }
 
-        Ok((pipeline_layout, pipeline))
+        Ok((pipeline_layout, pipeline, descriptor_set_layout))
     }
 
     fn get_vulkan_instance_extensions(window: &sdl2::video::Window) -> Vec<*const i8> {
@@ -1062,6 +1168,27 @@ tranfer queue family index: {:#?},
         Ok(())
     }
 
+    fn update_ubos(&mut self) {
+        let ubo = unsafe { &mut *self.frame_resources[self.current_frame].ubo_ptr };
+
+        let model = Mat4::from_rotation_z(self.current_frame as f32);
+
+        let view = Mat4::look_at_lh(
+            Vec3::new(2.0, 2.0, 2.0),
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+        );
+
+        ubo.model_view = model * view;
+
+        ubo.projection = Mat4::perspective_lh(
+            f32::to_radians(45.0),
+            self.swapchain_extent.width as f32 / self.swapchain_extent.height as f32,
+            0.1,
+            10.0,
+        );
+    }
+
     fn draw(&mut self) -> Result<(), Box<dyn Error>> {
         let wait_fences = [self.frame_resources[self.current_frame].fence];
 
@@ -1130,7 +1257,21 @@ tranfer queue family index: {:#?},
             self.device
                 .cmd_bind_vertex_buffers(command_buffer, 0, &vertex_buffers, &offsets);
 
-            self.device.cmd_bind_index_buffer(command_buffer, self.index_buffer, 0, vk::IndexType::UINT16);
+            self.device.cmd_bind_index_buffer(
+                command_buffer,
+                self.index_buffer,
+                0,
+                vk::IndexType::UINT16,
+            );
+
+            self.device.cmd_bind_descriptor_sets(
+                command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline_layout,
+                0,
+                &[self.frame_resources[self.current_frame].descriptor_set],
+                &[],
+            );
 
             self.device.cmd_draw_indexed(command_buffer, 6, 1, 0, 0, 0);
             self.device.cmd_end_render_pass(command_buffer);
@@ -1141,6 +1282,8 @@ tranfer queue family index: {:#?},
         let signal_semaphores = [self.frame_resources[self.current_frame].render_finished];
         let stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
         let command_buffers = [command_buffer];
+
+        self.update_ubos();
 
         let submits = [vk::SubmitInfo::builder()
             .wait_semaphores(&wait_semaphores)
@@ -1197,7 +1340,23 @@ impl Drop for Application {
                     .destroy_semaphore(frame_data.render_finished, None);
 
                 self.device.destroy_fence(frame_data.fence, None);
+
+                self.device.destroy_buffer(frame_data.uniform_buffer, None);
+                self.device
+                    .free_memory(frame_data.uniform_buffer_memory, None);
             }
+
+            let sets: Vec<_> = self
+                .frame_resources
+                .iter()
+                .map(|frame_res| frame_res.descriptor_set)
+                .collect();
+
+            self.device
+                .free_descriptor_sets(self.descriptor_pool, &sets);
+
+            self.device
+                .destroy_descriptor_pool(self.descriptor_pool, None);
 
             self.device
                 .destroy_command_pool(self.transfer_command_pool, None);
@@ -1211,6 +1370,8 @@ impl Drop for Application {
                     .destroy_image_view(image_resources.image_view, None);
             }
 
+            self.device
+                .destroy_descriptor_set_layout(self.descriptor_set_layout, None);
             self.device.destroy_pipeline(self.pipeline, None);
             self.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
