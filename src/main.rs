@@ -675,6 +675,7 @@ impl Application {
 
         let pool_create_info = vk::DescriptorPoolCreateInfo::builder()
             .pool_sizes(&pool_sizes)
+            .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET)
             .max_sets(FRAMES_IN_FLIGHT as u32);
 
         let descriptor_pool = unsafe { device.create_descriptor_pool(&pool_create_info, None)? };
@@ -909,7 +910,7 @@ tranfer queue family index: {:#?},
             .polygon_mode(vk::PolygonMode::FILL)
             .line_width(1.0)
             .cull_mode(vk::CullModeFlags::BACK)
-            .front_face(vk::FrontFace::CLOCKWISE)
+            .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
             .depth_bias_enable(false);
 
         let multisampler_state = vk::PipelineMultisampleStateCreateInfo::builder()
@@ -1171,7 +1172,7 @@ tranfer queue family index: {:#?},
     fn update_ubos(&mut self) {
         let ubo = unsafe { &mut *self.frame_resources[self.current_frame].ubo_ptr };
 
-        let model = Mat4::from_rotation_z(self.current_frame as f32);
+        let model = Mat4::from_rotation_z((self.frame_count as f32).to_radians());
 
         let view = Mat4::look_at_lh(
             Vec3::new(2.0, 2.0, 2.0),
@@ -1315,6 +1316,7 @@ tranfer queue family index: {:#?},
         }
 
         self.current_frame = (self.current_frame + 1) % FRAMES_IN_FLIGHT;
+        self.frame_count += 1;
 
         Ok(())
     }
