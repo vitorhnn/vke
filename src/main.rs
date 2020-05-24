@@ -3,7 +3,7 @@
 #![feature(try_find)]
 
 use ash::{
-    extensions::khr::{Surface, Swapchain},
+    extensions::khr::Swapchain,
     version::DeviceV1_0,
     version::EntryV1_0,
     version::InstanceV1_0,
@@ -21,6 +21,9 @@ use memoffset::offset_of;
 
 use glam::{Mat4, Vec3};
 
+mod surface;
+mod swapchain;
+
 // kinda lifted from DXVK's Presenter
 struct FrameResources {
     image_available: vk::Semaphore,
@@ -33,12 +36,6 @@ struct FrameResources {
     descriptor_set: vk::DescriptorSet,
 }
 
-struct ImageResources {
-    fence: vk::Fence,
-    framebuffer: vk::Framebuffer,
-    image_view: vk::ImageView,
-}
-
 struct Application {
     sdl_ctx: sdl2::Sdl,
     sdl_video_ctx: sdl2::VideoSubsystem,
@@ -47,12 +44,8 @@ struct Application {
     instance: Instance,
     device: Device,
     device_memory_properties: vk::PhysicalDeviceMemoryProperties,
-    surface: vk::SurfaceKHR,
-    surface_loader: Surface,
-    swapchain: vk::SwapchainKHR,
-    swapchain_loader: Swapchain,
-    swapchain_extent: vk::Extent2D,
-    image_resources: Vec<ImageResources>,
+    swapchain: swapchain::Swapchain,
+    surface: surface::Surface,
     frame_resources: Vec<FrameResources>,
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
@@ -62,7 +55,6 @@ struct Application {
     transfer_command_pool: vk::CommandPool,
     graphics_queue: vk::Queue,
     transfer_queue: vk::Queue,
-    image_count: u32,
     current_frame: usize,
     vertex_buffer: vk::Buffer,
     vertex_buffer_memory: vk::DeviceMemory,
@@ -167,11 +159,21 @@ const SHADER_MAIN_FN_NAME: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(
 
 const FRAMES_IN_FLIGHT: usize = 3;
 
+const DESIRED_EXTENT: vk::Extent2D = vk::Extent2D {
+    width: 1600,
+    height: 900,
+};
+
+const DESIRED_PRESENT_MODE: vk::PresentModeKHR = vk::PresentModeKHR::FIFO_RELAXED;
+
 impl Application {
     fn new() -> Result<Self, Box<dyn Error>> {
         let sdl_ctx = sdl2::init()?;
         let sdl_video_ctx = sdl_ctx.video()?;
-        let window = sdl_video_ctx.window("vke", 1600, 900).vulkan().build()?;
+        let window = sdl_video_ctx
+            .window("vke", DESIRED_EXTENT.width, DESIRED_EXTENT.height)
+            .vulkan()
+            .build()?;
 
         let entry = Entry::new()?;
 
@@ -204,13 +206,13 @@ impl Application {
 
         let instance = unsafe { entry.create_instance(&create_info_builder, None)? };
 
-        let surface = vk::SurfaceKHR::from_raw(
+        let surface = surface::Surface::new(
+            &entry,
+            &instance,
             window.vulkan_create_surface(instance.handle().as_raw() as usize)?,
-        );
+        )?;
 
-        let surface_loader = Surface::new(&entry, &instance);
-
-        let physical_device = Application::pick_vk_device(&instance, &surface_loader, surface)?;
+        let physical_device = Application::pick_vk_device(&instance, &surface)?;
 
         let selected_device_info = physical_device.expect("no suitable vulkan device");
 
@@ -249,39 +251,20 @@ impl Application {
         let device =
             unsafe { instance.create_device(physical_device, &create_device_info_builder, None)? };
 
+        let render_pass = Application::create_render_pass(&device)?;
+
+        let swapchain = swapchain::Swapchain::new(
+            &instance,
+            &device,
+            &surface,
+            physical_device,
+            DESIRED_EXTENT,
+            DESIRED_PRESENT_MODE,
+            render_pass,
+        )?;
+
         let graphics_queue = unsafe { device.get_device_queue(graphics_queue_family_index, 0) };
-
         let transfer_queue = unsafe { device.get_device_queue(transfer_queue_family_index, 0) };
-
-        let surface_capabilities = unsafe {
-            surface_loader.get_physical_device_surface_capabilities(physical_device, surface)?
-        };
-
-        let swapchain_extent = Application::pick_vk_surface_extent(&surface_capabilities)?;
-
-        let desired_image_count = Application::pick_vk_desired_image_count(&surface_capabilities);
-
-        let swapchain_loader = Swapchain::new(&instance, &device);
-
-        let swapchain_create_info = vk::SwapchainCreateInfoKHR::builder()
-            .surface(surface)
-            .min_image_count(desired_image_count)
-            .image_color_space(vk::ColorSpaceKHR::SRGB_NONLINEAR)
-            .image_format(vk::Format::B8G8R8A8_SRGB)
-            .image_extent(swapchain_extent)
-            .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
-            .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .pre_transform(surface_capabilities.current_transform)
-            .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
-            .present_mode(vk::PresentModeKHR::FIFO_RELAXED)
-            .clipped(true)
-            .image_array_layers(1);
-
-        let swapchain = unsafe { swapchain_loader.create_swapchain(&swapchain_create_info, None)? };
-
-        let present_images = unsafe { swapchain_loader.get_swapchain_images(swapchain)? };
-
-        let image_count = present_images.len() as u32;
 
         let command_pool_create_info = vk::CommandPoolCreateInfo {
             queue_family_index: graphics_queue_family_index,
@@ -360,53 +343,8 @@ impl Application {
             })
             .collect::<Result<_, _>>()?;
 
-        let render_pass = Application::create_render_pass(&device)?;
-
         let (pipeline_layout, pipeline, descriptor_set_layout) =
-            Application::create_graphics_pipeline(&device, swapchain_extent, render_pass)?;
-
-        let image_resources: Vec<ImageResources> = present_images
-            .iter()
-            .map::<Result<ImageResources, Box<dyn Error>>, _>(|&image| {
-                let create_view_info = vk::ImageViewCreateInfo::builder()
-                    .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(vk::Format::B8G8R8A8_SRGB)
-                    .components(vk::ComponentMapping {
-                        r: vk::ComponentSwizzle::IDENTITY,
-                        g: vk::ComponentSwizzle::IDENTITY,
-                        b: vk::ComponentSwizzle::IDENTITY,
-                        a: vk::ComponentSwizzle::IDENTITY,
-                    })
-                    .subresource_range(vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        base_mip_level: 0,
-                        level_count: 1,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    })
-                    .image(image);
-
-                let image_view = unsafe { device.create_image_view(&create_view_info, None)? };
-
-                let attachments = [image_view];
-
-                let framebuffer_create_info = vk::FramebufferCreateInfo::builder()
-                    .render_pass(render_pass)
-                    .attachments(&attachments)
-                    .width(swapchain_extent.width)
-                    .height(swapchain_extent.height)
-                    .layers(1);
-
-                let framebuffer =
-                    unsafe { device.create_framebuffer(&framebuffer_create_info, None) }?;
-
-                Ok(ImageResources {
-                    framebuffer,
-                    image_view,
-                    fence: vk::Fence::null(),
-                })
-            })
-            .collect::<Result<_, _>>()?;
+            Application::create_graphics_pipeline(&device, swapchain.extent, render_pass)?;
 
         let vertices = [
             Vertex {
@@ -714,7 +652,6 @@ impl Application {
         unsafe { device.update_descriptor_sets(&writes, &[]) };
 
         let app = Self {
-            image_count,
             current_frame: 0,
             sdl_ctx,
             sdl_video_ctx,
@@ -724,11 +661,7 @@ impl Application {
             device,
             device_memory_properties,
             surface,
-            surface_loader,
             swapchain,
-            swapchain_loader,
-            swapchain_extent,
-            image_resources,
             frame_resources,
             render_pass,
             pipeline_layout,
@@ -749,15 +682,13 @@ impl Application {
         println!(
             "
 VKe: application created
-format: {:#?},
 buffer size: {:#?},
 image count: {:#?},
 graphics queue family index: {:#?},
 tranfer queue family index: {:#?},
             ",
-            swapchain_create_info.image_format,
-            swapchain_extent,
-            present_images.len(),
+            app.swapchain.extent,
+            app.swapchain.image_resources.len(),
             graphics_queue_family_index,
             transfer_queue_family_index
         );
@@ -1012,50 +943,24 @@ tranfer queue family index: {:#?},
         names
     }
 
-    fn pick_vk_desired_image_count(surface_capabilites: &vk::SurfaceCapabilitiesKHR) -> u32 {
-        if surface_capabilites.max_image_count > 0
-            && surface_capabilites.min_image_count + 1 > surface_capabilites.max_image_count
-        {
-            surface_capabilites.max_image_count
-        } else {
-            surface_capabilites.min_image_count + 1
-        }
-    }
-
-    fn pick_vk_surface_extent(
-        surface_capabilities: &vk::SurfaceCapabilitiesKHR,
-    ) -> Result<vk::Extent2D, Box<dyn Error>> {
-        Ok(match surface_capabilities.current_extent.width {
-            std::u32::MAX => vk::Extent2D {
-                width: 1600,
-                height: 900,
-            },
-            _ => surface_capabilities.current_extent,
-        })
-    }
-
     fn pick_vk_device(
         instance: &Instance,
-        surface_loader: &Surface,
-        surface: vk::SurfaceKHR,
+        surface: &surface::Surface,
     ) -> Result<Option<SelectedDeviceInfo>, Box<dyn Error>> {
         let is_device_suitable = |device: &vk::PhysicalDevice| -> Result<bool, Box<dyn Error>> {
             unsafe {
                 let props = instance.get_physical_device_properties(*device);
+                let support_info = swapchain::SwapchainSupportInfo::get(*device, surface)?;
 
-                let surface_formats =
-                    surface_loader.get_physical_device_surface_formats(*device, surface)?;
-                let surface_present_modes =
-                    surface_loader.get_physical_device_surface_present_modes(*device, surface)?;
-
-                let suitable_swapchain_format = surface_formats.into_iter().any(|format| {
+                let suitable_swapchain_format = support_info.formats.into_iter().any(|format| {
                     format.format == vk::Format::B8G8R8A8_SRGB
                         && format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
                 });
 
-                let suitable_swapchain_present_mode = surface_present_modes
+                let suitable_swapchain_present_mode = support_info
+                    .present_modes
                     .into_iter()
-                    .any(|present_mode| present_mode == vk::PresentModeKHR::FIFO_RELAXED);
+                    .any(|present_mode| present_mode == DESIRED_PRESENT_MODE);
 
                 Ok((props.device_type == vk::PhysicalDeviceType::DISCRETE_GPU
                     || props.device_type == vk::PhysicalDeviceType::INTEGRATED_GPU)
@@ -1105,10 +1010,10 @@ tranfer queue family index: {:#?},
                             .queue_flags
                             .contains(vk::QueueFlags::GRAPHICS)
                             && unsafe {
-                                surface_loader.get_physical_device_surface_support(
+                                surface.loader.get_physical_device_surface_support(
                                     device,
                                     *index as u32,
-                                    surface,
+                                    surface.surface,
                                 )?
                             })
                     })?
@@ -1184,35 +1089,37 @@ tranfer queue family index: {:#?},
 
         ubo.projection = Mat4::perspective_lh(
             f32::to_radians(45.0),
-            self.swapchain_extent.width as f32 / self.swapchain_extent.height as f32,
+            self.swapchain.extent.width as f32 / self.swapchain.extent.height as f32,
             0.1,
             10.0,
         );
     }
 
     fn draw(&mut self) -> Result<(), Box<dyn Error>> {
-        let wait_fences = [self.frame_resources[self.current_frame].fence];
+        let frame_resources = &self.frame_resources[self.current_frame];
+        let wait_fences = [frame_resources.fence];
 
         unsafe {
             self.device.wait_for_fences(&wait_fences, true, u64::MAX)?;
         }
 
         let (image_index, _swapchain_suboptimal) = unsafe {
-            self.swapchain_loader.acquire_next_image(
-                self.swapchain,
+            self.swapchain.loader.acquire_next_image(
+                self.swapchain.swapchain,
                 u64::MAX,
                 self.frame_resources[self.current_frame].image_available,
                 vk::Fence::null(),
             )?
         };
 
-        if self.image_resources[image_index as usize].fence != vk::Fence::null() {
-            let wait_fences = [self.image_resources[image_index as usize].fence];
+        let image_resources = &mut self.swapchain.image_resources[image_index as usize];
+
+        if image_resources.fence != vk::Fence::null() {
+            let wait_fences = [image_resources.fence];
             unsafe { self.device.wait_for_fences(&wait_fences, true, u64::MAX)? };
         }
 
-        self.image_resources[image_index as usize].fence =
-            self.frame_resources[self.current_frame].fence;
+        image_resources.fence = self.frame_resources[self.current_frame].fence;
 
         let command_buffer = self.frame_resources[self.current_frame].command_buffer;
 
@@ -1233,9 +1140,9 @@ tranfer queue family index: {:#?},
 
         let render_pass_begin_info = vk::RenderPassBeginInfo::builder()
             .render_pass(self.render_pass)
-            .framebuffer(self.image_resources[image_index as usize].framebuffer)
+            .framebuffer(image_resources.framebuffer)
             .render_area(vk::Rect2D {
-                extent: self.swapchain_extent,
+                extent: self.swapchain.extent,
                 offset: vk::Offset2D { x: 0, y: 0 },
             })
             .clear_values(&clear_values);
@@ -1302,7 +1209,7 @@ tranfer queue family index: {:#?},
             )?
         };
 
-        let swapchains = [self.swapchain];
+        let swapchains = [self.swapchain.swapchain];
         let image_indices = [image_index];
 
         let present_info = vk::PresentInfoKHR::builder()
@@ -1311,7 +1218,8 @@ tranfer queue family index: {:#?},
             .image_indices(&image_indices);
 
         unsafe {
-            self.swapchain_loader
+            self.swapchain
+                .loader
                 .queue_present(self.graphics_queue, &present_info)?;
         }
 
@@ -1365,12 +1273,15 @@ impl Drop for Application {
             self.device
                 .destroy_command_pool(self.graphics_command_pool, None);
 
-            for image_resources in &self.image_resources {
+            for image_resources in &self.swapchain.image_resources {
                 self.device
                     .destroy_framebuffer(image_resources.framebuffer, None);
                 self.device
                     .destroy_image_view(image_resources.image_view, None);
             }
+
+            self.swapchain.loader.destroy_swapchain(self.swapchain.swapchain, None);
+            self.surface.loader.destroy_surface(self.surface.surface, None);
 
             self.device
                 .destroy_descriptor_set_layout(self.descriptor_set_layout, None);
@@ -1379,10 +1290,7 @@ impl Drop for Application {
                 .destroy_pipeline_layout(self.pipeline_layout, None);
             self.device.destroy_render_pass(self.render_pass, None);
 
-            self.swapchain_loader
-                .destroy_swapchain(self.swapchain, None);
             self.device.destroy_device(None);
-            self.surface_loader.destroy_surface(self.surface, None);
             self.instance.destroy_instance(None);
         }
     }
