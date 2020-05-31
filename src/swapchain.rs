@@ -140,12 +140,19 @@ impl Swapchain {
             })
             .collect::<Result<_, _>>()?;
 
-        Ok(Swapchain {
+        let swapchain = Swapchain {
             swapchain,
             loader,
             extent,
             image_resources,
             support_info,
-        })
+        };
+
+        println!("VKe swapchain created!");
+        println!("images: {}", swapchain.image_resources.len());
+        println!("extent: {:#?}", swapchain.extent);
+        println!("present mode: {:#?}", present_mode);
+
+        Ok(swapchain)
     }
 }

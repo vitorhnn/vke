@@ -3,19 +3,15 @@
 #![feature(try_find)]
 
 use ash::{
-    extensions::khr::Swapchain,
-    version::DeviceV1_0,
-    version::EntryV1_0,
-    version::InstanceV1_0,
-    vk,
-    vk::Handle,
-    Device, Entry, Instance,
+    extensions::khr::Swapchain, prelude::VkResult, version::DeviceV1_0, version::EntryV1_0,
+    version::InstanceV1_0, vk, vk::Handle, Device, Entry, Instance,
 };
 
 use sdl2::event::Event;
 
 use std::error::Error;
 use std::ffi::CStr;
+use std::fmt::Debug;
 
 use memoffset::offset_of;
 
@@ -37,6 +33,8 @@ struct FrameResources {
 }
 
 struct Application {
+    desired_extent: vk::Extent2D,
+    desired_present_mode: vk::PresentModeKHR,
     sdl_ctx: sdl2::Sdl,
     sdl_video_ctx: sdl2::VideoSubsystem,
     window: sdl2::video::Window,
@@ -62,6 +60,7 @@ struct Application {
     index_buffer_memory: vk::DeviceMemory,
     descriptor_pool: vk::DescriptorPool,
     frame_count: usize,
+    physical_device: vk::PhysicalDevice,
 }
 
 #[repr(C)]
@@ -159,19 +158,16 @@ const SHADER_MAIN_FN_NAME: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(
 
 const FRAMES_IN_FLIGHT: usize = 3;
 
-const DESIRED_EXTENT: vk::Extent2D = vk::Extent2D {
-    width: 1600,
-    height: 900,
-};
-
-const DESIRED_PRESENT_MODE: vk::PresentModeKHR = vk::PresentModeKHR::FIFO_RELAXED;
-
 impl Application {
-    fn new() -> Result<Self, Box<dyn Error>> {
+    fn new(
+        desired_extent: vk::Extent2D,
+        desired_present_mode: vk::PresentModeKHR,
+    ) -> Result<Self, Box<dyn Error>> {
         let sdl_ctx = sdl2::init()?;
         let sdl_video_ctx = sdl_ctx.video()?;
         let window = sdl_video_ctx
-            .window("vke", DESIRED_EXTENT.width, DESIRED_EXTENT.height)
+            .window("vke", desired_extent.width, desired_extent.height)
+            .resizable()
             .vulkan()
             .build()?;
 
@@ -212,9 +208,9 @@ impl Application {
             window.vulkan_create_surface(instance.handle().as_raw() as usize)?,
         )?;
 
-        let physical_device = Application::pick_vk_device(&instance, &surface)?;
+        let selected_device_info = Application::pick_vk_device(&instance, &surface, desired_present_mode)?;
 
-        let selected_device_info = physical_device.expect("no suitable vulkan device");
+        let selected_device_info = selected_device_info.expect("no suitable vulkan device");
 
         let physical_device = selected_device_info.device;
         let graphics_queue_family_index = selected_device_info.graphics_family;
@@ -258,8 +254,8 @@ impl Application {
             &device,
             &surface,
             physical_device,
-            DESIRED_EXTENT,
-            DESIRED_PRESENT_MODE,
+            desired_extent,
+            desired_present_mode,
             render_pass,
         )?;
 
@@ -343,8 +339,14 @@ impl Application {
             })
             .collect::<Result<_, _>>()?;
 
-        let (pipeline_layout, pipeline, descriptor_set_layout) =
-            Application::create_graphics_pipeline(&device, swapchain.extent, render_pass)?;
+        let descriptor_set_layout = Application::create_descriptor_set_layout(&device)?;
+
+        let (pipeline_layout, pipeline) = Application::create_graphics_pipeline(
+            &device,
+            swapchain.extent,
+            render_pass,
+            &[descriptor_set_layout],
+        )?;
 
         let vertices = [
             Vertex {
@@ -652,6 +654,8 @@ impl Application {
         unsafe { device.update_descriptor_sets(&writes, &[]) };
 
         let app = Self {
+            desired_extent,
+            desired_present_mode,
             current_frame: 0,
             sdl_ctx,
             sdl_video_ctx,
@@ -676,22 +680,13 @@ impl Application {
             index_buffer,
             index_buffer_memory,
             descriptor_pool,
+            physical_device,
             frame_count: 0,
         };
 
-        println!(
-            "
-VKe: application created
-buffer size: {:#?},
-image count: {:#?},
-graphics queue family index: {:#?},
-tranfer queue family index: {:#?},
-            ",
-            app.swapchain.extent,
-            app.swapchain.image_resources.len(),
-            graphics_queue_family_index,
-            transfer_queue_family_index
-        );
+        println!("VKe: application created");
+        println!("graphics queue family index: {:#?}", graphics_queue_family_index);
+        println!("tranfer queue family index: {:#?}", transfer_queue_family_index);
 
         Ok(app)
     }
@@ -778,11 +773,26 @@ tranfer queue family index: {:#?},
         Ok(renderpass)
     }
 
+    fn create_descriptor_set_layout(device: &Device) -> VkResult<vk::DescriptorSetLayout> {
+        let layout_bindings = [vk::DescriptorSetLayoutBinding::builder()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::VERTEX)
+            .build()];
+
+        let layout_create_info =
+            vk::DescriptorSetLayoutCreateInfo::builder().bindings(&layout_bindings);
+
+        Ok(unsafe { device.create_descriptor_set_layout(&layout_create_info, None)? })
+    }
+
     fn create_graphics_pipeline(
         device: &Device,
         swapchain_extent: vk::Extent2D,
         render_pass: vk::RenderPass,
-    ) -> Result<(vk::PipelineLayout, vk::Pipeline, vk::DescriptorSetLayout), Box<dyn Error>> {
+        descriptor_set_layouts: &[vk::DescriptorSetLayout],
+    ) -> Result<(vk::PipelineLayout, vk::Pipeline), Box<dyn Error>> {
         let raw_vs = include_bytes!("../vert.spv");
         let raw_fs = include_bytes!("../frag.spv");
 
@@ -863,23 +873,8 @@ tranfer queue family index: {:#?},
             .logic_op_enable(false)
             .attachments(&color_blend_attachment_states);
 
-        let layout_bindings = [vk::DescriptorSetLayoutBinding::builder()
-            .binding(0)
-            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::VERTEX)
-            .build()];
-
-        let layout_create_info =
-            vk::DescriptorSetLayoutCreateInfo::builder().bindings(&layout_bindings);
-
-        let descriptor_set_layout =
-            unsafe { device.create_descriptor_set_layout(&layout_create_info, None)? };
-
-        let set_layouts = [descriptor_set_layout];
-
         let pipeline_layout_info =
-            vk::PipelineLayoutCreateInfo::builder().set_layouts(&set_layouts);
+            vk::PipelineLayoutCreateInfo::builder().set_layouts(&descriptor_set_layouts);
 
         let pipeline_layout =
             unsafe { device.create_pipeline_layout(&pipeline_layout_info, None)? };
@@ -910,7 +905,7 @@ tranfer queue family index: {:#?},
             device.destroy_shader_module(vs_module, None);
         }
 
-        Ok((pipeline_layout, pipeline, descriptor_set_layout))
+        Ok((pipeline_layout, pipeline))
     }
 
     fn get_vulkan_instance_extensions(window: &sdl2::video::Window) -> Vec<*const i8> {
@@ -946,6 +941,7 @@ tranfer queue family index: {:#?},
     fn pick_vk_device(
         instance: &Instance,
         surface: &surface::Surface,
+        desired_present_mode: vk::PresentModeKHR,
     ) -> Result<Option<SelectedDeviceInfo>, Box<dyn Error>> {
         let is_device_suitable = |device: &vk::PhysicalDevice| -> Result<bool, Box<dyn Error>> {
             unsafe {
@@ -960,7 +956,7 @@ tranfer queue family index: {:#?},
                 let suitable_swapchain_present_mode = support_info
                     .present_modes
                     .into_iter()
-                    .any(|present_mode| present_mode == DESIRED_PRESENT_MODE);
+                    .any(|present_mode| present_mode == desired_present_mode);
 
                 Ok((props.device_type == vk::PhysicalDeviceType::DISCRETE_GPU
                     || props.device_type == vk::PhysicalDeviceType::INTEGRATED_GPU)
@@ -1061,6 +1057,14 @@ tranfer queue family index: {:#?},
                 match event {
                     Event::Quit { .. } => {
                         break 'running;
+                    },
+                    Event::Window { win_event, .. } => {
+                        use sdl2::event::WindowEvent;
+                        use sdl2::video::FullscreenType;
+
+                        if let WindowEvent::Maximized = win_event {
+                            self.window.set_fullscreen(FullscreenType::True)?;
+                        }
                     }
                     _ => {}
                 }
@@ -1068,8 +1072,6 @@ tranfer queue family index: {:#?},
 
             self.draw()?;
         }
-
-        unsafe { self.device.device_wait_idle()? };
 
         Ok(())
     }
@@ -1095,7 +1097,7 @@ tranfer queue family index: {:#?},
         );
     }
 
-    fn draw(&mut self) -> Result<(), Box<dyn Error>> {
+    fn draw(&mut self) -> VkResult<()> {
         let frame_resources = &self.frame_resources[self.current_frame];
         let wait_fences = [frame_resources.fence];
 
@@ -1103,14 +1105,25 @@ tranfer queue family index: {:#?},
             self.device.wait_for_fences(&wait_fences, true, u64::MAX)?;
         }
 
-        let (image_index, _swapchain_suboptimal) = unsafe {
+        let acquire_result = unsafe {
             self.swapchain.loader.acquire_next_image(
                 self.swapchain.swapchain,
                 u64::MAX,
                 self.frame_resources[self.current_frame].image_available,
                 vk::Fence::null(),
-            )?
+            )
         };
+
+        let (image_index, out_of_date) = match acquire_result {
+            Ok((_, true)) => (0, false),
+            Ok((image_index, false)) => (image_index, false),
+            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => (0, true),
+            Err(e) => return Err(e),
+        };
+
+        if out_of_date {
+            todo!("out of date");
+        }
 
         let image_resources = &mut self.swapchain.image_resources[image_index as usize];
 
@@ -1217,10 +1230,21 @@ tranfer queue family index: {:#?},
             .swapchains(&swapchains)
             .image_indices(&image_indices);
 
-        unsafe {
+        let present_result = unsafe {
             self.swapchain
                 .loader
-                .queue_present(self.graphics_queue, &present_info)?;
+                .queue_present(self.graphics_queue, &present_info)
+        };
+
+        let should_recreate = match present_result {
+            Ok(true) => true,
+            Ok(false) => false,
+            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => true,
+            Err(e) => return Err(e),
+        };
+
+        if should_recreate {
+            self.recreate_swapchain().unwrap();
         }
 
         self.current_frame = (self.current_frame + 1) % FRAMES_IN_FLIGHT;
@@ -1232,16 +1256,70 @@ tranfer queue family index: {:#?},
     const fn should_use_validation_layers() -> bool {
         cfg!(debug_assertions)
     }
+
+    fn recreate_swapchain(&mut self) -> Result<(), Box<dyn Error>> {
+        unsafe { self.device.device_wait_idle()? };
+
+        self.drop_swapchain();
+
+        self.render_pass = Application::create_render_pass(&self.device)?;
+        self.swapchain = swapchain::Swapchain::new(
+            &self.instance,
+            &self.device,
+            &self.surface,
+            self.physical_device,
+            self.desired_extent,
+            self.desired_present_mode,
+            self.render_pass,
+        )?;
+
+        let pipeline_double = Application::create_graphics_pipeline(
+            &self.device,
+            self.swapchain.extent,
+            self.render_pass,
+            &[self.descriptor_set_layout],
+        )?;
+
+        self.pipeline_layout = pipeline_double.0;
+        self.pipeline = pipeline_double.1;
+
+        Ok(())
+    }
+
+    fn drop_swapchain(&mut self) {
+        unsafe {
+            for image_resources in &self.swapchain.image_resources {
+                self.device
+                    .destroy_framebuffer(image_resources.framebuffer, None);
+                self.device
+                    .destroy_image_view(image_resources.image_view, None);
+            }
+
+            self.swapchain
+                .loader
+                .destroy_swapchain(self.swapchain.swapchain, None);
+
+            self.device.destroy_pipeline(self.pipeline, None);
+            self.device
+                .destroy_pipeline_layout(self.pipeline_layout, None);
+            self.device.destroy_render_pass(self.render_pass, None);
+        }
+    }
 }
 
 impl Drop for Application {
     fn drop(&mut self) {
         unsafe {
+            self.device
+                .device_wait_idle()
+                .expect("couldn't wait for device idle");
             self.device.destroy_buffer(self.vertex_buffer, None);
             self.device.free_memory(self.vertex_buffer_memory, None);
 
             self.device.destroy_buffer(self.index_buffer, None);
             self.device.free_memory(self.index_buffer_memory, None);
+
+            self.drop_swapchain();
 
             for frame_data in &self.frame_resources {
                 self.device
@@ -1273,22 +1351,12 @@ impl Drop for Application {
             self.device
                 .destroy_command_pool(self.graphics_command_pool, None);
 
-            for image_resources in &self.swapchain.image_resources {
-                self.device
-                    .destroy_framebuffer(image_resources.framebuffer, None);
-                self.device
-                    .destroy_image_view(image_resources.image_view, None);
-            }
-
-            self.swapchain.loader.destroy_swapchain(self.swapchain.swapchain, None);
-            self.surface.loader.destroy_surface(self.surface.surface, None);
+            self.surface
+                .loader
+                .destroy_surface(self.surface.surface, None);
 
             self.device
                 .destroy_descriptor_set_layout(self.descriptor_set_layout, None);
-            self.device.destroy_pipeline(self.pipeline, None);
-            self.device
-                .destroy_pipeline_layout(self.pipeline_layout, None);
-            self.device.destroy_render_pass(self.render_pass, None);
 
             self.device.destroy_device(None);
             self.instance.destroy_instance(None);
@@ -1296,11 +1364,9 @@ impl Drop for Application {
     }
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let app = Application::new();
-
-    let mut app = match app {
-        Ok(app) => app,
+fn result_msgbox<T, E: Debug>(result: Result<T, E>) -> Result<T, E> {
+    match result {
+        Ok(thing) => Ok(thing),
         Err(e) => {
             use sdl2::messagebox;
 
@@ -1312,9 +1378,27 @@ fn main() -> Result<(), Box<dyn Error>> {
             )
             .expect("unable to show an error, congrats");
 
-            return Err(e);
+            Err(e)
         }
-    };
+    }
+}
 
-    app.run()
+fn main() -> Result<(), Box<dyn Error>> {
+    let mut app = result_msgbox(Application::new(
+        vk::Extent2D {
+            width: 1280,
+            height: 720,
+        },
+        vk::PresentModeKHR::FIFO,
+    ))?;
+
+    match result_msgbox(app.run()) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            unsafe {
+                app.device.device_wait_idle().unwrap();
+            }
+            Err(e)
+        }
+    }
 }
