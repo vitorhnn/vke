@@ -12,3 +12,5 @@ ash = "0.30.0"
 sdl2 = "0.33.0"
 memoffset = "0.5.4"
 glam = { version = "0.8.7" }
+png = "0.16.4"
+tinyvec = "0.3.3"

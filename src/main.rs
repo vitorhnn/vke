@@ -1,6 +1,8 @@
 // rust devs pls stabilize
 #![feature(const_cstr_unchecked)]
 #![feature(try_find)]
+#![feature(const_int_pow)]
+#![feature(const_in_array_repeat_expressions)]
 
 use ash::{
     extensions::khr::Swapchain, prelude::VkResult, version::DeviceV1_0, version::EntryV1_0,
@@ -12,11 +14,13 @@ use sdl2::event::Event;
 use std::error::Error;
 use std::ffi::CStr;
 use std::fmt::Debug;
+use std::rc::Rc;
 
 use memoffset::offset_of;
 
 use glam::{Mat4, Vec3};
 
+mod allocator;
 mod surface;
 mod swapchain;
 
@@ -40,7 +44,7 @@ struct Application {
     window: sdl2::video::Window,
     entry: Entry,
     instance: Instance,
-    device: Device,
+    device: Rc<Device>,
     device_memory_properties: vk::PhysicalDeviceMemoryProperties,
     swapchain: swapchain::Swapchain,
     surface: surface::Surface,
@@ -61,6 +65,7 @@ struct Application {
     descriptor_pool: vk::DescriptorPool,
     frame_count: usize,
     physical_device: vk::PhysicalDevice,
+    allocator: allocator::Allocator,
 }
 
 #[repr(C)]
@@ -208,7 +213,8 @@ impl Application {
             window.vulkan_create_surface(instance.handle().as_raw() as usize)?,
         )?;
 
-        let selected_device_info = Application::pick_vk_device(&instance, &surface, desired_present_mode)?;
+        let selected_device_info =
+            Application::pick_vk_device(&instance, &surface, desired_present_mode)?;
 
         let selected_device_info = selected_device_info.expect("no suitable vulkan device");
 
@@ -244,8 +250,11 @@ impl Application {
             .enabled_extension_names(&device_extensions)
             .enabled_features(&device_features_builder);
 
-        let device =
-            unsafe { instance.create_device(physical_device, &create_device_info_builder, None)? };
+        let device = Rc::new(unsafe {
+            instance.create_device(physical_device, &create_device_info_builder, None)?
+        });
+
+        let mut allocator = allocator::Allocator::new(physical_device, device.clone(), &instance);
 
         let render_pass = Application::create_render_pass(&device)?;
 
@@ -372,14 +381,13 @@ impl Application {
         let vertex_buffer_size = std::mem::size_of_val(&vertices) as u64;
         let index_buffer_size = std::mem::size_of_val(&indices) as u64;
 
-        let (staging_buffer, staging_buffer_memory) = Application::create_buffer(
-            &device,
-            vertex_buffer_size + index_buffer_size,
-            vk::BufferUsageFlags::TRANSFER_SRC,
-            device_memory_properties,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            vk::SharingMode::EXCLUSIVE,
-        )?;
+        let staging_buffer_info = vk::BufferCreateInfo::builder()
+            .size(vertex_buffer_size + index_buffer_size)
+            .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+        let (staging_buffer, staging_buffer_allocation) =
+            allocator.create_buffer(&staging_buffer_info, allocator::MemoryUsage::HostOnly)?;
 
         let (vertex_buffer, vertex_buffer_memory) = Application::create_buffer(
             &device,
@@ -400,12 +408,7 @@ impl Application {
         )?;
 
         unsafe {
-            let mapped = device.map_memory(
-                staging_buffer_memory,
-                0,
-                vertex_buffer_size + index_buffer_size,
-                vk::MemoryMapFlags::empty(),
-            )?;
+            let mapped = staging_buffer_allocation.map(&device, vk::MemoryMapFlags::empty())?;
 
             {
                 let slice = std::slice::from_raw_parts_mut(
@@ -425,7 +428,7 @@ impl Application {
                 slice.copy_from_slice(&indices);
             }
 
-            device.unmap_memory(staging_buffer_memory);
+            staging_buffer_allocation.unmap(&device);
         }
 
         // the following code assumes that we get a different transfer and graphics queue
@@ -600,7 +603,6 @@ impl Application {
             device.free_command_buffers(graphics_command_pool, &graphics_buffers);
             device.free_command_buffers(transfer_command_pool, &transfer_buffers);
             device.destroy_buffer(staging_buffer, None);
-            device.free_memory(staging_buffer_memory, None);
 
             device.destroy_semaphore(transfer_done_semaphore, None);
 
@@ -682,11 +684,18 @@ impl Application {
             descriptor_pool,
             physical_device,
             frame_count: 0,
+            allocator,
         };
 
         println!("VKe: application created");
-        println!("graphics queue family index: {:#?}", graphics_queue_family_index);
-        println!("tranfer queue family index: {:#?}", transfer_queue_family_index);
+        println!(
+            "graphics queue family index: {:#?}",
+            graphics_queue_family_index
+        );
+        println!(
+            "tranfer queue family index: {:#?}",
+            transfer_queue_family_index
+        );
 
         Ok(app)
     }
@@ -1057,7 +1066,7 @@ impl Application {
                 match event {
                     Event::Quit { .. } => {
                         break 'running;
-                    },
+                    }
                     Event::Window { win_event, .. } => {
                         use sdl2::event::WindowEvent;
                         use sdl2::video::FullscreenType;
@@ -1122,7 +1131,8 @@ impl Application {
         };
 
         if out_of_date {
-            todo!("out of date");
+            self.recreate_swapchain().unwrap();
+            return Ok(());
         }
 
         let image_resources = &mut self.swapchain.image_resources[image_index as usize];
@@ -1318,6 +1328,8 @@ impl Drop for Application {
 
             self.device.destroy_buffer(self.index_buffer, None);
             self.device.free_memory(self.index_buffer_memory, None);
+
+            self.allocator.hacky_manual_drop();
 
             self.drop_swapchain();
 
