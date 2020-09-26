@@ -30,9 +30,8 @@ struct FrameResources {
     render_finished: vk::Semaphore,
     fence: vk::Fence,
     command_buffer: vk::CommandBuffer,
+    uniform_buffer_allocation: allocator::Allocation,
     uniform_buffer: vk::Buffer,
-    uniform_buffer_memory: vk::DeviceMemory,
-    ubo_ptr: *mut Ubo,
     descriptor_set: vk::DescriptorSet,
 }
 
@@ -59,13 +58,11 @@ struct Application {
     transfer_queue: vk::Queue,
     current_frame: usize,
     vertex_buffer: vk::Buffer,
-    vertex_buffer_memory: vk::DeviceMemory,
     index_buffer: vk::Buffer,
-    index_buffer_memory: vk::DeviceMemory,
     descriptor_pool: vk::DescriptorPool,
     frame_count: usize,
     physical_device: vk::PhysicalDevice,
-    allocator: allocator::Allocator,
+    allocator: Rc<allocator::Allocator>,
 }
 
 #[repr(C)]
@@ -76,7 +73,7 @@ struct Vertex {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct Ubo {
     model_view: Mat4,
     projection: Mat4,
@@ -254,7 +251,11 @@ impl Application {
             instance.create_device(physical_device, &create_device_info_builder, None)?
         });
 
-        let mut allocator = allocator::Allocator::new(physical_device, device.clone(), &instance);
+        let allocator = Rc::new(allocator::Allocator::new(
+            physical_device,
+            device.clone(),
+            &instance,
+        ));
 
         let render_pass = Application::create_render_pass(&device)?;
 
@@ -312,28 +313,13 @@ impl Application {
 
                 let command_buffer = command_buffers[0];
 
-                let (uniform_buffer, uniform_buffer_memory) = Application::create_buffer(
-                    &device,
-                    std::mem::size_of::<Ubo>() as u64,
-                    vk::BufferUsageFlags::UNIFORM_BUFFER,
-                    device_memory_properties,
-                    vk::MemoryPropertyFlags::DEVICE_LOCAL
-                        | vk::MemoryPropertyFlags::HOST_VISIBLE
-                        | vk::MemoryPropertyFlags::HOST_COHERENT,
-                    vk::SharingMode::EXCLUSIVE,
-                )?;
+                let ubo_info = vk::BufferCreateInfo::builder()
+                    .size(std::mem::size_of::<Ubo>() as u64)
+                    .usage(vk::BufferUsageFlags::UNIFORM_BUFFER)
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
-                // we're deviating from vulkan-tutorial here
-                // most modern gpus have some host visible, cached and device local memory
-                // this is called "persistent buffer mapping" in opengl parlance
-                let ubo_ptr = unsafe {
-                    device.map_memory(
-                        uniform_buffer_memory,
-                        0,
-                        std::mem::size_of::<Ubo>() as u64,
-                        vk::MemoryMapFlags::empty(),
-                    )?
-                } as *mut Ubo;
+                let (uniform_buffer, uniform_buffer_allocation) =
+                    allocator.create_buffer(&ubo_info, allocator::MemoryUsage::HostToDevice)?;
 
                 Ok(FrameResources {
                     image_available,
@@ -341,8 +327,7 @@ impl Application {
                     fence,
                     command_buffer,
                     uniform_buffer,
-                    uniform_buffer_memory,
-                    ubo_ptr,
+                    uniform_buffer_allocation,
                     descriptor_set: vk::DescriptorSet::null(),
                 })
             })
@@ -389,26 +374,24 @@ impl Application {
         let (staging_buffer, staging_buffer_allocation) =
             allocator.create_buffer(&staging_buffer_info, allocator::MemoryUsage::HostOnly)?;
 
-        let (vertex_buffer, vertex_buffer_memory) = Application::create_buffer(
-            &device,
-            vertex_buffer_size,
-            vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-            device_memory_properties,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            vk::SharingMode::EXCLUSIVE,
-        )?;
+        let vertex_buffer_info = vk::BufferCreateInfo::builder()
+            .size(vertex_buffer_size)
+            .usage(vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
-        let (index_buffer, index_buffer_memory) = Application::create_buffer(
-            &device,
-            index_buffer_size,
-            vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-            device_memory_properties,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            vk::SharingMode::EXCLUSIVE,
-        )?;
+        let (vertex_buffer, vertex_buffer_allocation) =
+            allocator.create_buffer(&vertex_buffer_info, allocator::MemoryUsage::DeviceOnly)?;
+
+        let index_buffer_info = vk::BufferCreateInfo::builder()
+            .size(index_buffer_size)
+            .usage(vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+        let (index_buffer, index_buffer_allocation) =
+            allocator.create_buffer(&index_buffer_info, allocator::MemoryUsage::DeviceOnly)?;
 
         unsafe {
-            let mapped = staging_buffer_allocation.map(&device, vk::MemoryMapFlags::empty())?;
+            let mapped = allocator.map(&staging_buffer_allocation)?;
 
             {
                 let slice = std::slice::from_raw_parts_mut(
@@ -428,7 +411,7 @@ impl Application {
                 slice.copy_from_slice(&indices);
             }
 
-            staging_buffer_allocation.unmap(&device);
+            allocator.unmap(&staging_buffer_allocation);
         }
 
         // the following code assumes that we get a different transfer and graphics queue
@@ -678,9 +661,7 @@ impl Application {
             graphics_queue,
             transfer_queue,
             vertex_buffer,
-            vertex_buffer_memory,
             index_buffer,
-            index_buffer_memory,
             descriptor_pool,
             physical_device,
             frame_count: 0,
@@ -698,37 +679,6 @@ impl Application {
         );
 
         Ok(app)
-    }
-
-    fn create_buffer(
-        device: &Device,
-        device_size: vk::DeviceSize,
-        usage_flags: vk::BufferUsageFlags,
-        device_props: vk::PhysicalDeviceMemoryProperties,
-        properties: vk::MemoryPropertyFlags,
-        sharing_mode: vk::SharingMode,
-    ) -> Result<(vk::Buffer, vk::DeviceMemory), Box<dyn Error>> {
-        let buffer_create_info = vk::BufferCreateInfo::builder()
-            .size(device_size)
-            .usage(usage_flags)
-            .sharing_mode(sharing_mode);
-
-        let buffer = unsafe { device.create_buffer(&buffer_create_info, None)? };
-
-        let memory_requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
-
-        let memory_allocate_info = vk::MemoryAllocateInfo::builder()
-            .allocation_size(memory_requirements.size)
-            .memory_type_index(
-                find_memorytype_index(&memory_requirements, &device_props, properties)
-                    .expect("no suitable memory types"),
-            );
-
-        let buffer_memory = unsafe { device.allocate_memory(&memory_allocate_info, None)? };
-
-        unsafe { device.bind_buffer_memory(buffer, buffer_memory, 0)? };
-
-        Ok((buffer, buffer_memory))
     }
 
     fn create_shader_module(
@@ -1010,7 +960,7 @@ impl Application {
                 let maybe_graphics_queue_index = queues
                     .iter()
                     .enumerate()
-                    .try_find::<_, Box<dyn Error>, _>(|(index, queue_properties)| {
+                    .try_find(|(index, queue_properties)| -> VkResult<bool> {
                         Ok(queue_properties
                             .queue_flags
                             .contains(vk::QueueFlags::GRAPHICS)
@@ -1085,8 +1035,14 @@ impl Application {
         Ok(())
     }
 
-    fn update_ubos(&mut self) {
-        let ubo = unsafe { &mut *self.frame_resources[self.current_frame].ubo_ptr };
+    #[inline(never)]
+    fn update_ubos(&mut self) -> VkResult<()> {
+        let mapped = self
+            .allocator
+            .map(&self.frame_resources[self.current_frame].uniform_buffer_allocation)?
+            as *mut Ubo;
+
+        let mut ubo = unsafe { &mut *mapped };
 
         let model = Mat4::from_rotation_z((self.frame_count as f32).to_radians());
 
@@ -1104,6 +1060,8 @@ impl Application {
             0.1,
             10.0,
         );
+
+        Ok(())
     }
 
     fn draw(&mut self) -> VkResult<()> {
@@ -1170,6 +1128,8 @@ impl Application {
             })
             .clear_values(&clear_values);
 
+        self.update_ubos()?;
+
         unsafe {
             self.device.cmd_begin_render_pass(
                 command_buffer,
@@ -1213,8 +1173,6 @@ impl Application {
         let signal_semaphores = [self.frame_resources[self.current_frame].render_finished];
         let stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
         let command_buffers = [command_buffer];
-
-        self.update_ubos();
 
         let submits = [vk::SubmitInfo::builder()
             .wait_semaphores(&wait_semaphores)
@@ -1324,10 +1282,8 @@ impl Drop for Application {
                 .device_wait_idle()
                 .expect("couldn't wait for device idle");
             self.device.destroy_buffer(self.vertex_buffer, None);
-            self.device.free_memory(self.vertex_buffer_memory, None);
 
             self.device.destroy_buffer(self.index_buffer, None);
-            self.device.free_memory(self.index_buffer_memory, None);
 
             self.allocator.hacky_manual_drop();
 
@@ -1342,8 +1298,6 @@ impl Drop for Application {
                 self.device.destroy_fence(frame_data.fence, None);
 
                 self.device.destroy_buffer(frame_data.uniform_buffer, None);
-                self.device
-                    .free_memory(frame_data.uniform_buffer_memory, None);
             }
 
             let sets: Vec<_> = self

@@ -3,7 +3,8 @@ use ash::{
     version::{DeviceV1_0, InstanceV1_0},
     vk, Device, Instance,
 };
-use tinyvec::ArrayVec;
+
+use parking_lot::Mutex;
 
 use std::ffi::c_void;
 use std::rc::Rc;
@@ -13,7 +14,7 @@ fn find_memorytype_index(
     memory_req: &vk::MemoryRequirements,
     memory_prop: &vk::PhysicalDeviceMemoryProperties,
     usage: MemoryUsage,
-) -> Option<u32> {
+) -> Option<(u32, vk::MemoryPropertyFlags)> {
     let acceptable_flags = match usage {
         MemoryUsage::HostToDevice => {
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
@@ -36,12 +37,13 @@ fn find_memorytype_index(
         property_flags == preferred_flags
     });
     if best_suitable_index.is_some() {
-        return best_suitable_index;
+        return best_suitable_index.map(|r| (r, preferred_flags));
     }
     // Otherwise find a memory flag that works
     find_memorytype_index_f(memory_req, memory_prop, |property_flags| {
         property_flags == acceptable_flags
     })
+    .map(|r| (r, acceptable_flags))
 }
 
 fn find_memorytype_index_f<F: Fn(vk::MemoryPropertyFlags) -> bool>(
@@ -70,22 +72,33 @@ struct Block {
     memory: vk::DeviceMemory,
     size: vk::DeviceSize,
     current: vk::DeviceSize,
-    memory_type_index: u32,
+    persistent_ptr: Option<*mut c_void>,
 }
 
 impl Block {
-    pub fn new(device: &Device, size: vk::DeviceSize, memory_type_index: u32) -> VkResult<Self> {
+    pub fn new(
+        device: &Device,
+        size: vk::DeviceSize,
+        memory_type_index: u32,
+        persistent: bool,
+    ) -> VkResult<Self> {
         let memory_allocate_info = vk::MemoryAllocateInfo::builder()
             .allocation_size(size)
             .memory_type_index(memory_type_index);
 
         let memory = unsafe { device.allocate_memory(&memory_allocate_info, None) }?;
 
+        let map_ptr = if persistent {
+            Some(unsafe { device.map_memory(memory, 0, size, vk::MemoryMapFlags::empty())? })
+        } else {
+            None
+        };
+
         Ok(Self {
             memory,
             size,
-            memory_type_index,
             current: 0,
+            persistent_ptr: map_ptr,
         })
     }
 }
@@ -97,23 +110,11 @@ pub enum MemoryUsage {
     HostOnly,
 }
 
+#[derive(Debug)]
 pub struct Allocation {
-    memory: vk::DeviceMemory,
+    memory_type_index: u32,
     offset: vk::DeviceSize,
     size: vk::DeviceSize,
-}
-
-impl Allocation {
-    // TODO: these need to be in allocator
-    pub fn map(&self, device: &Device, flags: vk::MemoryMapFlags) -> VkResult<*mut c_void> {
-        unsafe { device.map_memory(self.memory, self.offset, self.size, flags) }
-    }
-
-    pub fn unmap(&self, device: &Device) {
-        unsafe {
-            device.unmap_memory(self.memory);
-        }
-    }
 }
 
 /// very dumb bump allocator
@@ -121,7 +122,7 @@ impl Allocation {
 pub struct Allocator {
     memory_properties: vk::PhysicalDeviceMemoryProperties,
     device: Rc<Device>,
-    blocks: ArrayVec<[Block; vk::MAX_MEMORY_TYPES]>,
+    blocks: Mutex<[Mutex<Option<Block>>; vk::MAX_MEMORY_TYPES]>,
 }
 
 const MEBIBYTE: usize = 2usize.pow(20);
@@ -132,7 +133,9 @@ impl Allocator {
         device: Rc<Device>,
         instance: &Instance,
     ) -> Self {
-        let blocks = ArrayVec::new();
+        // this wouldn't work if MAX_MEMORY_TYPES wasn't exactly 32 because
+        // rust STILL lacks const generics
+        let blocks = Default::default();
 
         let memory_properties =
             unsafe { instance.get_physical_device_memory_properties(physical_device) };
@@ -145,7 +148,7 @@ impl Allocator {
     }
 
     pub fn create_buffer(
-        &mut self,
+        &self,
         buffer_info: &vk::BufferCreateInfo,
         usage: MemoryUsage,
     ) -> VkResult<(vk::Buffer, Allocation)> {
@@ -153,32 +156,30 @@ impl Allocator {
 
         let memory_requirements = unsafe { self.device.get_buffer_memory_requirements(buffer) };
 
-        let memory_type_index =
+        let (memory_type_index, used_flags) =
             find_memorytype_index(&memory_requirements, &self.memory_properties, usage)
                 .expect("no suitable memory type found");
 
-        let block = {
-            // TODO: this is hella janky
-            let mut ret = None;
-            for block in self.blocks.iter_mut() {
-                if block.memory_type_index == memory_type_index {
-                    ret = Some(block);
-                }
-            }
+        let is_persistent = used_flags.contains(
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        );
 
-            if ret.is_none() {
-                self.blocks.push(Block::new(
-                    &self.device,
-                    (4 * MEBIBYTE) as u64,
-                    memory_type_index,
-                )?);
-                let last = self.blocks.len() - 1;
+        let mut blocks = self.blocks.lock();
 
-                ret = Some(&mut self.blocks[last]);
-            }
+        if blocks[memory_type_index as usize].lock().is_none() {
+            let block = Block::new(
+                &self.device,
+                (4 * MEBIBYTE) as u64,
+                memory_type_index,
+                is_persistent,
+            )?;
 
-            ret.unwrap()
-        };
+            blocks[memory_type_index as usize] = Mutex::new(Some(block));
+        }
+
+        let mut block = blocks[memory_type_index as usize].lock();
+
+        let block = block.as_mut().unwrap();
 
         let aligned = align_up(block.current, memory_requirements.alignment);
         let padding = aligned - block.current;
@@ -196,19 +197,53 @@ impl Allocator {
         }?;
 
         let allocation = Allocation {
-            memory: block.memory,
             size: used,
             offset: aligned,
+            memory_type_index,
         };
+
+        eprintln!("{:#?}", allocation);
 
         Ok((buffer, allocation))
     }
 
+    pub fn map(&self, allocation: &Allocation) -> VkResult<*mut u8> {
+        let blocks = self.blocks.lock();
+        let mut block = blocks[allocation.memory_type_index as usize].lock();
+        let block = block.as_mut().unwrap();
+        block.persistent_ptr.map_or_else(
+            || unsafe {
+                Ok(self.device.map_memory(
+                    block.memory,
+                    allocation.offset,
+                    allocation.size,
+                    vk::MemoryMapFlags::empty(),
+                )? as *mut u8)
+            },
+            |ptr| unsafe { Ok(ptr.add(allocation.offset as usize) as *mut u8) },
+        )
+    }
+
+    pub fn unmap(&self, allocation: &Allocation) {
+        let blocks = self.blocks.lock();
+        let mut block = blocks[allocation.memory_type_index as usize].lock();
+        let block = block.as_mut().unwrap();
+
+        unsafe {
+            self.device.unmap_memory(block.memory);
+        }
+    }
+
     // (very big) TODO: put all resources in nice RAII containers so the drop order isn't completely borked
-    pub fn hacky_manual_drop(&mut self) {
-        for block in self.blocks.iter() {
-            unsafe {
-                self.device.free_memory(block.memory, None);
+    pub fn hacky_manual_drop(&self) {
+        let blocks = self.blocks.lock();
+        for block_mutex in blocks.iter() {
+            let block = block_mutex.lock();
+
+            if let Some(block) = block.as_ref() {
+                unsafe {
+                    self.device.free_memory(block.memory, None);
+                }
             }
         }
     }
