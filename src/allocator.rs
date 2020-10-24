@@ -34,14 +34,14 @@ fn find_memorytype_index(
 
     // Try to find an exactly matching memory flag
     let best_suitable_index = find_memorytype_index_f(memory_req, memory_prop, |property_flags| {
-        property_flags == preferred_flags
+        property_flags.contains(preferred_flags)
     });
     if best_suitable_index.is_some() {
         return best_suitable_index.map(|r| (r, preferred_flags));
     }
     // Otherwise find a memory flag that works
     find_memorytype_index_f(memory_req, memory_prop, |property_flags| {
-        property_flags == acceptable_flags
+        property_flags.contains(acceptable_flags)
     })
     .map(|r| (r, acceptable_flags))
 }
@@ -112,9 +112,9 @@ pub enum MemoryUsage {
 
 #[derive(Debug)]
 pub struct Allocation {
-    memory_type_index: u32,
-    offset: vk::DeviceSize,
-    size: vk::DeviceSize,
+    pub memory_type_index: u32,
+    pub offset: vk::DeviceSize,
+    pub size: vk::DeviceSize,
 }
 
 /// very dumb bump allocator
@@ -230,7 +230,7 @@ impl Allocator {
         let block = block.as_mut().unwrap();
 
         unsafe {
-            self.device.unmap_memory(block.memory);
+            //self.device.unmap_memory(block.memory);
         }
     }
 

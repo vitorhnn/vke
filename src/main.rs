@@ -232,10 +232,14 @@ impl Application {
             .queue_family_index(transfer_queue_family_index)
             .queue_priorities(&priorities);
 
-        let queues = [
-            create_graphics_queue_info_builder.build(),
-            create_transfer_queue_info_builder.build(),
-        ];
+        let queues = if graphics_queue_family_index != transfer_queue_family_index {
+            vec![
+                create_graphics_queue_info_builder.build(),
+                create_transfer_queue_info_builder.build(),
+            ]
+        } else {
+            vec![create_graphics_queue_info_builder.build()]
+        };
 
         let device_features_builder = vk::PhysicalDeviceFeatures::builder();
 
@@ -595,7 +599,7 @@ impl Application {
 
         let pool_sizes = [vk::DescriptorPoolSize {
             descriptor_count: FRAMES_IN_FLIGHT as u32,
-            ..Default::default()
+            ty: vk::DescriptorType::UNIFORM_BUFFER,
         }];
 
         let pool_create_info = vk::DescriptorPoolCreateInfo::builder()
@@ -613,30 +617,28 @@ impl Application {
 
         let sets = unsafe { device.allocate_descriptor_sets(&descriptor_set_alloc_info)? };
 
-        let writes: Vec<_> = sets
-            .iter()
-            .enumerate()
-            .map(|(idx, &set)| {
-                let frame = &mut frame_resources[idx];
-                frame.descriptor_set = set; // side effects, yey!
+        for (i, &set) in sets.iter().enumerate() {
+            let frame = &mut frame_resources[i];
+            frame.descriptor_set = set; // side effects, yey!
 
-                let buffer_infos = [vk::DescriptorBufferInfo {
-                    buffer: frame.uniform_buffer,
-                    offset: 0,
-                    range: std::mem::size_of::<Ubo>() as u64,
-                }];
+            let buffer_infos = [vk::DescriptorBufferInfo {
+                buffer: frame.uniform_buffer,
+                offset: 0,
+                range: std::mem::size_of::<Ubo>() as u64,
+            }];
 
-                vk::WriteDescriptorSet::builder()
-                    .dst_set(frame.descriptor_set)
-                    .dst_binding(0)
-                    .dst_array_element(0)
-                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                    .buffer_info(&buffer_infos)
-                    .build()
-            })
-            .collect();
+            let update = vk::WriteDescriptorSet::builder()
+                .dst_set(frame.descriptor_set)
+                .dst_binding(0)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .buffer_info(&buffer_infos)
+                .build();
 
-        unsafe { device.update_descriptor_sets(&writes, &[]) };
+            unsafe {
+                device.update_descriptor_sets(&[update], &[]);
+            }
+        }
 
         let app = Self {
             desired_extent,
