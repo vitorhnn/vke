@@ -178,6 +178,8 @@ impl Application {
         let app_info = vk::ApplicationInfo::builder()
             .application_name(&APPLICATION_NAME)
             .application_version(vk::make_version(0, 1, 0))
+            .engine_name(&APPLICATION_NAME)
+            .engine_version(vk::make_version(0, 1, 0))
             .api_version(vk::make_version(1, 1, 0));
 
         let layers = if Application::are_validation_layers_supported(&entry)?
@@ -1037,7 +1039,6 @@ impl Application {
         Ok(())
     }
 
-    #[inline(never)]
     fn update_ubos(&mut self) -> VkResult<()> {
         let mapped = self
             .allocator

@@ -67,12 +67,17 @@ fn align_up(num: u64, align: u64) -> u64 {
     (num + align - 1) & align.wrapping_neg()
 }
 
-#[derive(Default)]
+enum MapInfo {
+    Persistent(*mut c_void),
+    Mapped { count: usize, ptr: *mut c_void },
+    Unmapped,
+}
+
 struct Block {
     memory: vk::DeviceMemory,
     size: vk::DeviceSize,
     current: vk::DeviceSize,
-    persistent_ptr: Option<*mut c_void>,
+    map_info: MapInfo,
 }
 
 impl Block {
@@ -88,17 +93,19 @@ impl Block {
 
         let memory = unsafe { device.allocate_memory(&memory_allocate_info, None) }?;
 
-        let map_ptr = if persistent {
-            Some(unsafe { device.map_memory(memory, 0, size, vk::MemoryMapFlags::empty())? })
+        let map_info = if persistent {
+            MapInfo::Persistent(unsafe {
+                device.map_memory(memory, 0, size, vk::MemoryMapFlags::empty())?
+            })
         } else {
-            None
+            MapInfo::Unmapped
         };
 
         Ok(Self {
             memory,
             size,
             current: 0,
-            persistent_ptr: map_ptr,
+            map_info,
         })
     }
 }
@@ -122,7 +129,7 @@ pub struct Allocation {
 pub struct Allocator {
     memory_properties: vk::PhysicalDeviceMemoryProperties,
     device: Rc<Device>,
-    blocks: Mutex<[Mutex<Option<Block>>; vk::MAX_MEMORY_TYPES]>,
+    blocks: Mutex<[Option<Block>; vk::MAX_MEMORY_TYPES]>,
 }
 
 const MEBIBYTE: usize = 2usize.pow(20);
@@ -166,7 +173,7 @@ impl Allocator {
 
         let mut blocks = self.blocks.lock();
 
-        if blocks[memory_type_index as usize].lock().is_none() {
+        if blocks[memory_type_index as usize].is_none() {
             let block = Block::new(
                 &self.device,
                 (4 * MEBIBYTE) as u64,
@@ -174,12 +181,10 @@ impl Allocator {
                 is_persistent,
             )?;
 
-            blocks[memory_type_index as usize] = Mutex::new(Some(block));
+            blocks[memory_type_index as usize] = Some(block);
         }
 
-        let mut block = blocks[memory_type_index as usize].lock();
-
-        let block = block.as_mut().unwrap();
+        let mut block = &mut blocks[memory_type_index as usize].as_mut().unwrap();
 
         let aligned = align_up(block.current, memory_requirements.alignment);
         let padding = aligned - block.current;
@@ -208,38 +213,54 @@ impl Allocator {
     }
 
     pub fn map(&self, allocation: &Allocation) -> VkResult<*mut u8> {
-        let blocks = self.blocks.lock();
-        let mut block = blocks[allocation.memory_type_index as usize].lock();
-        let block = block.as_mut().unwrap();
-        block.persistent_ptr.map_or_else(
-            || unsafe {
-                Ok(self.device.map_memory(
-                    block.memory,
-                    allocation.offset,
-                    allocation.size,
-                    vk::MemoryMapFlags::empty(),
-                )? as *mut u8)
-            },
-            |ptr| unsafe { Ok(ptr.add(allocation.offset as usize) as *mut u8) },
-        )
+        let mut blocks = self.blocks.lock();
+        let mut block = &mut blocks[allocation.memory_type_index as usize].as_mut().unwrap();
+
+        let ptr = match block.map_info {
+            MapInfo::Persistent(ptr) => ptr,
+            MapInfo::Mapped { ref mut count, ptr } => {
+                *count += 1;
+
+                ptr
+            }
+            MapInfo::Unmapped => {
+                let ptr = unsafe {
+                    self.device.map_memory(
+                        block.memory,
+                        0,
+                        block.size,
+                        vk::MemoryMapFlags::empty(),
+                    )?
+                };
+
+                block.map_info = MapInfo::Mapped { count: 1, ptr };
+
+                ptr
+            }
+        };
+
+        unsafe { Ok(ptr.add(allocation.offset as usize) as *mut u8) }
     }
 
     pub fn unmap(&self, allocation: &Allocation) {
-        let blocks = self.blocks.lock();
-        let mut block = blocks[allocation.memory_type_index as usize].lock();
-        let block = block.as_mut().unwrap();
+        let mut blocks = self.blocks.lock();
+        let block = &mut blocks[allocation.memory_type_index as usize].as_mut().unwrap();
 
-        unsafe {
-            //self.device.unmap_memory(block.memory);
+        match block.map_info {
+            MapInfo::Mapped { ref mut count, .. } if *count > 1 => {
+                *count -= 1;
+            }
+            MapInfo::Mapped { .. } => unsafe {
+                self.device.unmap_memory(block.memory);
+            }
+            _ => (),
         }
     }
 
     // (very big) TODO: put all resources in nice RAII containers so the drop order isn't completely borked
     pub fn hacky_manual_drop(&self) {
         let blocks = self.blocks.lock();
-        for block_mutex in blocks.iter() {
-            let block = block_mutex.lock();
-
+        for block in blocks.iter() {
             if let Some(block) = block.as_ref() {
                 unsafe {
                     self.device.free_memory(block.memory, None);
