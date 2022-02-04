@@ -1,8 +1,7 @@
-use ash::{
-    extensions::khr::Swapchain as SwapchainLoader, prelude::VkResult, version::DeviceV1_0, vk,
-    Device, Instance,
-};
+use ash::{extensions::khr::Swapchain as SwapchainLoader, prelude::VkResult, vk};
 
+use crate::device::Device;
+use crate::instance::Instance;
 use crate::surface::Surface;
 
 pub(crate) struct ImageResources {
@@ -68,14 +67,13 @@ impl Swapchain {
         instance: &Instance,
         device: &Device,
         surface: &Surface,
-        physical_device: vk::PhysicalDevice,
         desired_extent: vk::Extent2D,
         present_mode: vk::PresentModeKHR,
         render_pass: vk::RenderPass,
     ) -> VkResult<Self> {
-        let loader = SwapchainLoader::new(instance, device);
+        let loader = SwapchainLoader::new(&instance.inner, &device.inner.inner);
 
-        let support_info = SwapchainSupportInfo::get(physical_device, surface)?;
+        let support_info = SwapchainSupportInfo::get(device.physical_device, surface)?;
 
         let extent = pick_swapchain_extent(&support_info.capabilities, desired_extent);
 
@@ -118,7 +116,8 @@ impl Swapchain {
                     })
                     .image(image);
 
-                let image_view = unsafe { device.create_image_view(&create_view_info, None)? };
+                let image_view =
+                    unsafe { device.inner.create_image_view(&create_view_info, None)? };
 
                 let attachments = [image_view];
 
@@ -129,8 +128,11 @@ impl Swapchain {
                     .height(extent.height)
                     .layers(1);
 
-                let framebuffer =
-                    unsafe { device.create_framebuffer(&framebuffer_create_info, None) }?;
+                let framebuffer = unsafe {
+                    device
+                        .inner
+                        .create_framebuffer(&framebuffer_create_info, None)
+                }?;
 
                 Ok(ImageResources {
                     framebuffer,

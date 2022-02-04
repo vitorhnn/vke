@@ -1,13 +1,13 @@
-use ash::{
-    prelude::VkResult,
-    version::{DeviceV1_0, InstanceV1_0},
-    vk, Device, Instance,
-};
+use ash::{prelude::VkResult, vk};
 
 use parking_lot::Mutex;
 
 use std::ffi::c_void;
 use std::rc::Rc;
+
+use crate::buffer::Buffer;
+use crate::device::{Device, RawDevice};
+use crate::instance::Instance;
 
 // stolen from ash
 fn find_memorytype_index(
@@ -82,7 +82,7 @@ struct Block {
 
 impl Block {
     pub fn new(
-        device: &Device,
+        device: &RawDevice,
         size: vk::DeviceSize,
         memory_type_index: u32,
         persistent: bool,
@@ -91,11 +91,13 @@ impl Block {
             .allocation_size(size)
             .memory_type_index(memory_type_index);
 
-        let memory = unsafe { device.allocate_memory(&memory_allocate_info, None) }?;
+        let memory = unsafe { device.inner.allocate_memory(&memory_allocate_info, None) }?;
 
         let map_info = if persistent {
             MapInfo::Persistent(unsafe {
-                device.map_memory(memory, 0, size, vk::MemoryMapFlags::empty())?
+                device
+                    .inner
+                    .map_memory(memory, 0, size, vk::MemoryMapFlags::empty())?
             })
         } else {
             MapInfo::Unmapped
@@ -128,28 +130,27 @@ pub struct Allocation {
 /// the interface is similar to vk-mem's on purpose
 pub struct Allocator {
     memory_properties: vk::PhysicalDeviceMemoryProperties,
-    device: Rc<Device>,
+    device: Rc<RawDevice>,
     blocks: Mutex<[Option<Block>; vk::MAX_MEMORY_TYPES]>,
 }
 
 const MEBIBYTE: usize = 2usize.pow(20);
 
 impl Allocator {
-    pub fn new(
-        physical_device: vk::PhysicalDevice,
-        device: Rc<Device>,
-        instance: &Instance,
-    ) -> Self {
+    pub fn new(device: &Device, instance: &Instance) -> Self {
         // this wouldn't work if MAX_MEMORY_TYPES wasn't exactly 32 because
         // rust STILL lacks const generics
         let blocks = Default::default();
 
-        let memory_properties =
-            unsafe { instance.get_physical_device_memory_properties(physical_device) };
+        let memory_properties = unsafe {
+            instance
+                .inner
+                .get_physical_device_memory_properties(device.physical_device)
+        };
 
         Self {
+            device: device.inner.clone(),
             memory_properties,
-            device,
             blocks,
         }
     }
@@ -158,10 +159,11 @@ impl Allocator {
         &self,
         buffer_info: &vk::BufferCreateInfo,
         usage: MemoryUsage,
-    ) -> VkResult<(vk::Buffer, Allocation)> {
-        let buffer = unsafe { self.device.create_buffer(&buffer_info, None) }.unwrap();
+    ) -> VkResult<(Buffer, Allocation)> {
+        let buffer = Buffer::new(&self.device, &buffer_info)?;
 
-        let memory_requirements = unsafe { self.device.get_buffer_memory_requirements(buffer) };
+        let memory_requirements =
+            unsafe { self.device.inner.get_buffer_memory_requirements(buffer.inner) };
 
         let (memory_type_index, used_flags) =
             find_memorytype_index(&memory_requirements, &self.memory_properties, usage)
@@ -198,7 +200,8 @@ impl Allocator {
 
         unsafe {
             self.device
-                .bind_buffer_memory(buffer, block.memory, aligned)
+                .inner
+                .bind_buffer_memory(buffer.inner, block.memory, aligned)
         }?;
 
         let allocation = Allocation {
@@ -214,7 +217,9 @@ impl Allocator {
 
     pub fn map(&self, allocation: &Allocation) -> VkResult<*mut u8> {
         let mut blocks = self.blocks.lock();
-        let mut block = &mut blocks[allocation.memory_type_index as usize].as_mut().unwrap();
+        let mut block = &mut blocks[allocation.memory_type_index as usize]
+            .as_mut()
+            .unwrap();
 
         let ptr = match block.map_info {
             MapInfo::Persistent(ptr) => ptr,
@@ -225,7 +230,7 @@ impl Allocator {
             }
             MapInfo::Unmapped => {
                 let ptr = unsafe {
-                    self.device.map_memory(
+                    self.device.inner.map_memory(
                         block.memory,
                         0,
                         block.size,
@@ -244,26 +249,29 @@ impl Allocator {
 
     pub fn unmap(&self, allocation: &Allocation) {
         let mut blocks = self.blocks.lock();
-        let block = &mut blocks[allocation.memory_type_index as usize].as_mut().unwrap();
+        let block = &mut blocks[allocation.memory_type_index as usize]
+            .as_mut()
+            .unwrap();
 
         match block.map_info {
             MapInfo::Mapped { ref mut count, .. } if *count > 1 => {
                 *count -= 1;
             }
             MapInfo::Mapped { .. } => unsafe {
-                self.device.unmap_memory(block.memory);
-            }
+                self.device.inner.unmap_memory(block.memory);
+            },
             _ => (),
         }
     }
+}
 
-    // (very big) TODO: put all resources in nice RAII containers so the drop order isn't completely borked
-    pub fn hacky_manual_drop(&self) {
+impl Drop for Allocator {
+    fn drop(&mut self) {
         let blocks = self.blocks.lock();
         for block in blocks.iter() {
             if let Some(block) = block.as_ref() {
                 unsafe {
-                    self.device.free_memory(block.memory, None);
+                    self.device.inner.free_memory(block.memory, None);
                 }
             }
         }
