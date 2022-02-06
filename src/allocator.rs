@@ -162,8 +162,11 @@ impl Allocator {
     ) -> VkResult<(Buffer, Allocation)> {
         let buffer = Buffer::new(&self.device, &buffer_info)?;
 
-        let memory_requirements =
-            unsafe { self.device.inner.get_buffer_memory_requirements(buffer.inner) };
+        let memory_requirements = unsafe {
+            self.device
+                .inner
+                .get_buffer_memory_requirements(buffer.inner)
+        };
 
         let (memory_type_index, used_flags) =
             find_memorytype_index(&memory_requirements, &self.memory_properties, usage)
