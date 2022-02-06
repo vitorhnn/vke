@@ -2,6 +2,8 @@ use std::error::Error;
 use std::ops::Deref;
 use std::rc::Rc;
 
+use ash::extensions::khr::TimelineSemaphore;
+use ash::vk::{Semaphore, SemaphoreCreateInfo, SemaphoreType, SemaphoreTypeCreateInfo};
 use ash::{extensions::khr::Swapchain as KhrSwapchain, prelude::VkResult, vk, Device as VkDevice};
 
 use crate::instance::Instance;
@@ -36,6 +38,7 @@ impl Drop for RawDevice {
 // but we'll roll with it for now
 pub struct Device {
     pub inner: Rc<RawDevice>,
+    pub timeline_semaphore: TimelineSemaphore,
     pub physical_device: vk::PhysicalDevice,
     pub graphics_queue: Rc<Queue>,
     pub transfer_queue: Rc<Queue>,
@@ -85,16 +88,22 @@ impl Device {
             vec![create_graphics_queue_info_builder.build()]
         };
 
+        let mut timeline_semaphores_features =
+            vk::PhysicalDeviceTimelineSemaphoreFeaturesKHR::builder().timeline_semaphore(true);
         let device_features_builder = vk::PhysicalDeviceFeatures::builder();
 
-        let device_extensions = [KhrSwapchain::name().as_ptr()];
+        let device_extensions = [
+            KhrSwapchain::name().as_ptr(),
+            TimelineSemaphore::name().as_ptr(),
+        ];
 
         let create_device_info_builder = vk::DeviceCreateInfo::builder()
             .queue_create_infos(&queues)
             // this is *technically* wrong, device layers != instance layers
             .enabled_layer_names(&instance.layers)
             .enabled_extension_names(&device_extensions)
-            .enabled_features(&device_features_builder);
+            .enabled_features(&device_features_builder)
+            .push_next(&mut timeline_semaphores_features);
 
         let raw_device = Rc::new(RawDevice {
             inner: unsafe {
@@ -121,10 +130,12 @@ impl Device {
             raw_transfer_queue,
         )?);
 
+        let timeline_semaphore = TimelineSemaphore::new(&instance.inner, &raw_device);
         Ok(Self {
             inner: raw_device,
             physical_device,
             graphics_queue,
+            timeline_semaphore,
             transfer_queue,
         })
     }
@@ -236,5 +247,15 @@ impl Device {
         }
 
         Ok(None)
+    }
+
+    pub fn create_timeline_semaphore(&self, initial_value: u64) -> VkResult<Semaphore> {
+        let mut type_create_info = SemaphoreTypeCreateInfo::builder()
+            .semaphore_type(SemaphoreType::TIMELINE_KHR)
+            .initial_value(initial_value);
+
+        let semaphore_create_info = SemaphoreCreateInfo::builder().push_next(&mut type_create_info);
+
+        unsafe { self.inner.create_semaphore(&semaphore_create_info, None) }
     }
 }

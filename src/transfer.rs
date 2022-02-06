@@ -1,17 +1,13 @@
-use ash::{
-    prelude::VkResult,
-    vk,
-    Device,
-};
+use ash::{prelude::VkResult, vk};
 
 use ash::vk::Semaphore;
 use smallvec::{smallvec, SmallVec};
 use std::rc::Rc;
 
 use crate::allocator::{Allocation, Allocator, MemoryUsage};
-use crate::device::RawDevice;
-use crate::queue::Queue;
 use crate::buffer::Buffer;
+use crate::device::{Device, RawDevice};
+use crate::queue::Queue;
 
 struct BufferSlice {
     buffer: vk::Buffer,
@@ -34,7 +30,7 @@ struct QueueContext {
 }
 
 pub struct Transfer {
-    device: Rc<RawDevice>,
+    device: Rc<Device>,
     allocator: Rc<Allocator>,
     buffer: Buffer,
     allocation: Allocation,
@@ -49,7 +45,7 @@ const STAGING_BUFFER_SIZE: usize = KIBIBYTE * 512;
 
 impl Transfer {
     pub fn new(
-        device: Rc<RawDevice>,
+        device: Rc<Device>,
         allocator: Rc<Allocator>,
         graphics_queue: Rc<Queue>,
         transfer_queue: Option<Rc<Queue>>,
@@ -65,7 +61,7 @@ impl Transfer {
         let ptr = allocator.map(&allocation)?;
 
         let graphics_command_pool = unsafe {
-            device.create_command_pool(
+            device.inner.create_command_pool(
                 &vk::CommandPoolCreateInfo {
                     queue_family_index: graphics_queue.family_index,
                     flags: vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER
@@ -77,12 +73,14 @@ impl Transfer {
         };
 
         let graphics_command_buffers = unsafe {
-            device.allocate_command_buffers(&vk::CommandBufferAllocateInfo {
-                command_buffer_count: 1,
-                command_pool: graphics_command_pool,
-                level: vk::CommandBufferLevel::PRIMARY,
-                ..Default::default()
-            })?
+            device
+                .inner
+                .allocate_command_buffers(&vk::CommandBufferAllocateInfo {
+                    command_buffer_count: 1,
+                    command_pool: graphics_command_pool,
+                    level: vk::CommandBufferLevel::PRIMARY,
+                    ..Default::default()
+                })?
         };
 
         let graphics_command_buffer = graphics_command_buffers[0];
@@ -98,7 +96,7 @@ impl Transfer {
 
         let transfer_queue_ctx = if let Some(transfer_queue) = transfer_queue {
             let command_pool = unsafe {
-                device.create_command_pool(
+                device.inner.create_command_pool(
                     &vk::CommandPoolCreateInfo {
                         queue_family_index: transfer_queue.family_index,
                         flags: vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER
@@ -110,12 +108,14 @@ impl Transfer {
             };
 
             let command_buffers = unsafe {
-                device.allocate_command_buffers(&vk::CommandBufferAllocateInfo {
-                    command_buffer_count: 1,
-                    level: vk::CommandBufferLevel::PRIMARY,
-                    command_pool,
-                    ..Default::default()
-                })?
+                device
+                    .inner
+                    .allocate_command_buffers(&vk::CommandBufferAllocateInfo {
+                        command_buffer_count: 1,
+                        level: vk::CommandBufferLevel::PRIMARY,
+                        command_pool,
+                        ..Default::default()
+                    })?
             };
 
             Some(QueueContext {
@@ -229,6 +229,7 @@ impl Transfer {
 
                 unsafe {
                     self.device
+                        .inner
                         .begin_command_buffer(transfer_ctx.command_buffer, &begin_info)?
                 };
 
@@ -247,7 +248,7 @@ impl Transfer {
                     }];
 
                     unsafe {
-                        self.device.cmd_copy_buffer(
+                        self.device.inner.cmd_copy_buffer(
                             transfer_ctx.command_buffer,
                             copy.src.buffer,
                             copy.dst.buffer,
@@ -258,7 +259,7 @@ impl Transfer {
 
                 unsafe {
                     // TODO: come back here for image barriers
-                    self.device.cmd_pipeline_barrier(
+                    self.device.inner.cmd_pipeline_barrier(
                         transfer_ctx.command_buffer,
                         vk::PipelineStageFlags::TRANSFER,
                         vk::PipelineStageFlags::BOTTOM_OF_PIPE,
@@ -271,25 +272,24 @@ impl Transfer {
 
                 unsafe {
                     self.device
+                        .inner
                         .end_command_buffer(transfer_ctx.command_buffer)?
                 };
 
-                let semaphore_create_info = vk::SemaphoreCreateInfo {
-                    ..Default::default()
-                };
-
-                let semaphore =
-                    unsafe { self.device.create_semaphore(&semaphore_create_info, None)? };
+                let semaphore = self.device.create_timeline_semaphore(0)?;
 
                 let buffers = [transfer_ctx.command_buffer];
                 let semaphores: SmallVec<[Semaphore; 1]> = smallvec![semaphore];
+                let mut semaphore_submit =
+                    vk::TimelineSemaphoreSubmitInfoKHR::builder().signal_semaphore_values(&[1]);
                 let submits = [vk::SubmitInfo::builder()
                     .command_buffers(&buffers)
                     .signal_semaphores(&semaphores)
+                    .push_next(&mut semaphore_submit)
                     .build()];
 
                 unsafe {
-                    self.device.queue_submit(
+                    self.device.inner.queue_submit(
                         transfer_ctx.queue.inner,
                         &submits,
                         vk::Fence::null(),
@@ -308,6 +308,7 @@ impl Transfer {
 
             unsafe {
                 self.device
+                    .inner
                     .begin_command_buffer(gfx_ctx.command_buffer, &begin_info)?
             };
 
@@ -326,7 +327,7 @@ impl Transfer {
                 }];
 
                 unsafe {
-                    self.device.cmd_copy_buffer(
+                    self.device.inner.cmd_copy_buffer(
                         gfx_ctx.command_buffer,
                         copy.src.buffer,
                         copy.dst.buffer,
@@ -337,7 +338,7 @@ impl Transfer {
 
             unsafe {
                 // TODO: come back here for image barriers
-                self.device.cmd_pipeline_barrier(
+                self.device.inner.cmd_pipeline_barrier(
                     gfx_ctx.command_buffer,
                     vk::PipelineStageFlags::TOP_OF_PIPE,
                     vk::PipelineStageFlags::ALL_COMMANDS,
@@ -348,37 +349,41 @@ impl Transfer {
                 )
             }
 
-            unsafe { self.device.end_command_buffer(gfx_ctx.command_buffer)? };
+            unsafe {
+                self.device
+                    .inner
+                    .end_command_buffer(gfx_ctx.command_buffer)?
+            };
 
             let buffers = [gfx_ctx.command_buffer];
             // TODO: write something that's capable of using more specific wait stages
             let stages = [vk::PipelineStageFlags::ALL_COMMANDS];
+            let mut semaphore_submit = vk::TimelineSemaphoreSubmitInfoKHR::builder()
+                .wait_semaphore_values(&[1])
+                .signal_semaphore_values(&[2]);
             let submits = [vk::SubmitInfo::builder()
                 .command_buffers(&buffers)
                 .wait_dst_stage_mask(&stages)
                 .wait_semaphores(&semaphores)
+                .signal_semaphores(&semaphores)
+                .push_next(&mut semaphore_submit)
                 .build()];
-
-            let graphics_done_fence = unsafe {
-                self.device.inner.create_fence(
-                    &vk::FenceCreateInfo {
-                        ..Default::default()
-                    },
-                    None,
-                )?
-            };
-
-            unsafe {
-                self.device
-                    .queue_submit(gfx_ctx.queue.inner, &submits, graphics_done_fence)?
-            };
 
             unsafe {
                 self.device
                     .inner
-                    .wait_for_fences(&[graphics_done_fence], true, u64::MAX)?;
-                self.device.destroy_fence(graphics_done_fence, None);
-                self.device.destroy_semaphore(semaphores[0], None);
+                    .queue_submit(gfx_ctx.queue.inner, &submits, vk::Fence::null())?
+            };
+
+            let sem_wait_info = vk::SemaphoreWaitInfoKHR::builder()
+                .values(&[2])
+                .semaphores(&semaphores);
+
+            unsafe {
+                self.device
+                    .timeline_semaphore
+                    .wait_semaphores(&sem_wait_info, u64::MAX)?;
+                self.device.inner.destroy_semaphore(semaphores[0], None);
             };
 
             self.used = 0;
@@ -394,10 +399,13 @@ impl Drop for Transfer {
     fn drop(&mut self) {
         unsafe {
             self.device
+                .inner
                 .destroy_command_pool(self.graphics_queue_ctx.command_pool, None);
 
             if let Some(ctx) = &self.transfer_queue_ctx {
-                self.device.destroy_command_pool(ctx.command_pool, None);
+                self.device
+                    .inner
+                    .destroy_command_pool(ctx.command_pool, None);
             }
         }
     }

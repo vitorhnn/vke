@@ -49,7 +49,7 @@ struct Application {
     window: sdl2::video::Window,
     swapchain: swapchain::Swapchain,
     allocator: Rc<allocator::Allocator>,
-    device: Device,
+    device: Rc<Device>,
     surface: surface::Surface,
     transfer: Transfer,
     frame_resources: Vec<FrameResources>,
@@ -130,12 +130,16 @@ impl Application {
             window.vulkan_create_surface(instance.raw_handle() as usize)?,
         )?;
 
-        let device = Device::from_heuristics(&instance, &surface, desired_present_mode)?;
+        let device = Rc::new(Device::from_heuristics(
+            &instance,
+            &surface,
+            desired_present_mode,
+        )?);
 
         let allocator = Rc::new(allocator::Allocator::new(&device, &instance));
 
         let mut transfer = Transfer::new(
-            device.inner.clone(),
+            device.clone(),
             allocator.clone(),
             device.graphics_queue.clone(),
             Some(device.transfer_queue.clone()),
