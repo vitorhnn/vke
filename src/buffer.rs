@@ -3,20 +3,20 @@ use std::rc::Rc;
 
 use ash::vk;
 
-use crate::device::{Device, RawDevice};
+use crate::device::Device;
 
 pub struct Buffer {
     pub inner: vk::Buffer,
-    pub device: Rc<RawDevice>,
+    pub device: Rc<Device>,
 }
 
 impl Buffer {
-    pub fn new(device: &Rc<RawDevice>, create_info: &vk::BufferCreateInfo) -> VkResult<Self> {
-        let buffer = unsafe { device.inner.create_buffer(&create_info, None)? };
+    pub fn new(device: Rc<Device>, create_info: &vk::BufferCreateInfo) -> VkResult<Self> {
+        let buffer = unsafe { device.inner.create_buffer(create_info, None)? };
 
         Ok(Buffer {
             inner: buffer,
-            device: device.clone(),
+            device,
         })
     }
 }

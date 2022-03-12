@@ -19,11 +19,7 @@ impl Queue {
             ..Default::default()
         };
 
-        let pool = unsafe {
-            device
-                .inner
-                .create_command_pool(&command_pool_create_info, None)?
-        };
+        let pool = unsafe { device.create_command_pool(&command_pool_create_info, None)? };
 
         Ok(Self {
             device,
@@ -38,9 +34,7 @@ impl Drop for Queue {
     fn drop(&mut self) {
         eprintln!("destroy command pool");
         unsafe {
-            self.device
-                .inner
-                .destroy_command_pool(self.command_pool, None);
+            self.device.destroy_command_pool(self.command_pool, None);
         }
     }
 }

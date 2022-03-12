@@ -1,13 +1,16 @@
 use ash::{prelude::VkResult, vk};
 
-use ash::vk::Semaphore;
+use ash::vk::{Image, Semaphore};
 use smallvec::{smallvec, SmallVec};
+use std::default::Default;
 use std::rc::Rc;
 
-use crate::allocator::{Allocation, Allocator, MemoryUsage};
+use crate::allocator::{Allocator, MemoryUsage};
 use crate::buffer::Buffer;
-use crate::device::{Device, RawDevice};
+use crate::device::Device;
 use crate::queue::Queue;
+use crate::texture::Texture;
+use gpu_allocator::vulkan::Allocation;
 
 struct BufferSlice {
     buffer: vk::Buffer,
@@ -15,18 +18,31 @@ struct BufferSlice {
     size: u64,
 }
 
-struct PendingCopy {
+struct PendingBufferCopy {
+    src: vk::Buffer,
+    dst: vk::Buffer,
+    copy: vk::BufferCopy,
+}
+
+struct PendingImageCopy {
     src: BufferSlice,
-    dst: BufferSlice,
+    dst_image: vk::Image,
+    copy_op: vk::BufferImageCopy,
+}
+
+struct Barriers {
+    buffer: Vec<vk::BufferMemoryBarrier>,
+    image: Vec<vk::ImageMemoryBarrier>,
 }
 
 struct QueueContext {
     queue: Rc<Queue>,
     command_pool: vk::CommandPool,
     command_buffer: vk::CommandBuffer,
-    pre_barriers: Vec<vk::BufferMemoryBarrier>,
-    post_barriers: Vec<vk::BufferMemoryBarrier>,
-    pending_copies: Vec<PendingCopy>,
+    pre_barriers: Barriers,
+    post_barriers: Barriers,
+    pending_buffer_copies: Vec<PendingBufferCopy>,
+    pending_image_copies: Vec<PendingImageCopy>,
 }
 
 pub struct Transfer {
@@ -40,8 +56,17 @@ pub struct Transfer {
     transfer_queue_ctx: Option<QueueContext>,
 }
 
-const KIBIBYTE: usize = 2usize.pow(10);
-const STAGING_BUFFER_SIZE: usize = KIBIBYTE * 512;
+const MEBIBYTE: usize = 2usize.pow(20);
+const STAGING_BUFFER_SIZE: usize = MEBIBYTE * 64;
+
+impl Barriers {
+    pub fn new() -> Self {
+        Self {
+            image: Vec::new(),
+            buffer: Vec::new(),
+        }
+    }
+}
 
 impl Transfer {
     pub fn new(
@@ -89,9 +114,10 @@ impl Transfer {
             queue: graphics_queue,
             command_buffer: graphics_command_buffer,
             command_pool: graphics_command_pool,
-            pre_barriers: Vec::new(),
-            post_barriers: Vec::new(),
-            pending_copies: Vec::new(),
+            pre_barriers: Barriers::new(),
+            post_barriers: Barriers::new(),
+            pending_buffer_copies: Vec::new(),
+            pending_image_copies: Vec::new(),
         };
 
         let transfer_queue_ctx = if let Some(transfer_queue) = transfer_queue {
@@ -121,9 +147,10 @@ impl Transfer {
             Some(QueueContext {
                 queue: transfer_queue,
                 command_buffer: command_buffers[0],
-                pre_barriers: Vec::new(),
-                post_barriers: Vec::new(),
-                pending_copies: Vec::new(),
+                pre_barriers: Barriers::new(),
+                post_barriers: Barriers::new(),
+                pending_buffer_copies: Vec::new(),
+                pending_image_copies: Vec::new(),
                 command_pool,
             })
         } else {
@@ -142,52 +169,65 @@ impl Transfer {
         })
     }
 
+    fn upload_to_staging_buffer<T, F>(&mut self, callback: F) -> (usize, usize)
+    where
+        T: Copy,
+        F: FnOnce(&mut [T]) -> usize,
+    {
+        unsafe {
+            let slice = std::slice::from_raw_parts_mut(
+                self.ptr.add(self.used),
+                STAGING_BUFFER_SIZE - self.used,
+            );
+
+            // HACK: this is likely BEYOND broken. check here if we get vertex corruption
+            let (prefix, aligned, _suffix) = slice.align_to_mut::<T>();
+
+            let written = callback(aligned);
+
+            let start_of_data = prefix.len() + self.used;
+            self.used += prefix.len() + written;
+
+            (written, start_of_data)
+        }
+    }
+
     pub fn upload_buffer_callback<T, F>(&mut self, callback: F, dest: &Buffer) -> VkResult<()>
     where
         T: Copy,
-        F: Fn(&mut [T]) -> usize,
+        F: FnOnce(&mut [T]) -> usize,
     {
+        let (written, start_of_data) = self.upload_to_staging_buffer(callback);
+
         if let Some(transfer_ctx) = &mut self.transfer_queue_ctx {
             unsafe {
-                let slice = std::slice::from_raw_parts_mut(
-                    self.ptr.add(self.used),
-                    STAGING_BUFFER_SIZE - self.used,
-                );
-
-                // HACK: this is likely BEYOND broken. check here if we get texture / vertex corruption
-                let (prefix, aligned, suffix) = slice.align_to_mut::<T>();
-
-                let written = callback(aligned);
-
-                let start_of_data = prefix.len() + self.used;
-                self.used += prefix.len() + written;
-
-                transfer_ctx.post_barriers.push(vk::BufferMemoryBarrier {
-                    buffer: dest.inner,
-                    src_access_mask: vk::AccessFlags::TRANSFER_WRITE,
-                    dst_access_mask: vk::AccessFlags::empty(),
-                    src_queue_family_index: transfer_ctx.queue.family_index,
-                    dst_queue_family_index: self.graphics_queue_ctx.queue.family_index,
-                    offset: 0,
-                    size: written as u64,
-                    ..Default::default()
-                });
-
-                transfer_ctx.pending_copies.push(PendingCopy {
-                    src: BufferSlice {
-                        buffer: self.buffer.inner,
-                        offset: start_of_data as u64,
-                        size: written as u64,
-                    },
-                    dst: BufferSlice {
+                transfer_ctx
+                    .post_barriers
+                    .buffer
+                    .push(vk::BufferMemoryBarrier {
                         buffer: dest.inner,
-                        offset: 0, // currently assuming we should write the entire buffer
+                        src_access_mask: vk::AccessFlags::TRANSFER_WRITE,
+                        dst_access_mask: vk::AccessFlags::empty(),
+                        src_queue_family_index: transfer_ctx.queue.family_index,
+                        dst_queue_family_index: self.graphics_queue_ctx.queue.family_index,
+                        offset: 0,
+                        size: written as u64,
+                        ..Default::default()
+                    });
+
+                transfer_ctx.pending_buffer_copies.push(PendingBufferCopy {
+                    src: self.buffer.inner,
+                    dst: dest.inner,
+                    copy: vk::BufferCopy {
+                        src_offset: start_of_data as u64,
+                        dst_offset: 0,
                         size: written as u64,
                     },
                 });
 
                 self.graphics_queue_ctx
                     .post_barriers
+                    .buffer
                     .push(vk::BufferMemoryBarrier {
                         buffer: dest.inner,
                         src_access_mask: vk::AccessFlags::empty(),
@@ -218,11 +258,108 @@ impl Transfer {
         )
     }
 
+    pub fn upload_image_callback<T, F>(&mut self, callback: F, dest: &Texture) -> VkResult<()>
+    where
+        T: Copy,
+        F: FnOnce(&mut [T]) -> usize,
+    {
+        let (written, start_of_data) = self.upload_to_staging_buffer(callback);
+
+        if let Some(transfer_ctx) = &mut self.transfer_queue_ctx {
+            transfer_ctx
+                .pre_barriers
+                .image
+                .push(vk::ImageMemoryBarrier {
+                    image: dest.image,
+                    src_access_mask: vk::AccessFlags::empty(),
+                    dst_access_mask: vk::AccessFlags::TRANSFER_WRITE,
+                    src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                    dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                    old_layout: vk::ImageLayout::UNDEFINED,
+                    new_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    subresource_range: vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    },
+                    ..Default::default()
+                });
+
+            transfer_ctx.pending_image_copies.push(PendingImageCopy {
+                src: BufferSlice {
+                    buffer: self.buffer.inner,
+                    offset: start_of_data as u64,
+                    size: written as u64,
+                },
+                dst_image: dest.image,
+                copy_op: vk::BufferImageCopy {
+                    buffer_offset: start_of_data as u64,
+                    buffer_row_length: 0,
+                    buffer_image_height: 0,
+                    image_extent: dest.extent,
+                    image_offset: vk::Offset3D { x: 0, y: 0, z: 0 },
+                    image_subresource: vk::ImageSubresourceLayers {
+                        layer_count: 1,
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_array_layer: 0,
+                        mip_level: 0,
+                    },
+                },
+            });
+
+            let subresource_range = vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            };
+
+            transfer_ctx
+                .post_barriers
+                .image
+                .push(vk::ImageMemoryBarrier {
+                    image: dest.image,
+                    src_access_mask: vk::AccessFlags::TRANSFER_WRITE,
+                    dst_access_mask: vk::AccessFlags::empty(),
+                    src_queue_family_index: transfer_ctx.queue.family_index,
+                    dst_queue_family_index: self.graphics_queue_ctx.queue.family_index,
+                    old_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    subresource_range,
+                    ..Default::default()
+                });
+
+            self.graphics_queue_ctx
+                .post_barriers
+                .image
+                .push(vk::ImageMemoryBarrier {
+                    image: dest.image,
+                    src_access_mask: vk::AccessFlags::empty(),
+                    dst_access_mask: vk::AccessFlags::MEMORY_READ,
+                    src_queue_family_index: transfer_ctx.queue.family_index,
+                    dst_queue_family_index: self.graphics_queue_ctx.queue.family_index,
+                    old_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    subresource_range,
+                    ..Default::default()
+                });
+
+            Ok(())
+        } else {
+            todo!();
+        }
+    }
+
     pub fn flush(&mut self) -> VkResult<()> {
         if let Some(transfer_ctx) = &mut self.transfer_queue_ctx {
-            let semaphores = if !transfer_ctx.pending_copies.is_empty()
-                || !transfer_ctx.pre_barriers.is_empty()
-                || !transfer_ctx.post_barriers.is_empty()
+            let semaphores = if !transfer_ctx.pending_buffer_copies.is_empty()
+                || !transfer_ctx.pre_barriers.buffer.is_empty()
+                || !transfer_ctx.pre_barriers.image.is_empty()
+                || !transfer_ctx.post_barriers.buffer.is_empty()
+                || !transfer_ctx.post_barriers.image.is_empty()
             {
                 let begin_info = vk::CommandBufferBeginInfo::builder()
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
@@ -233,40 +370,52 @@ impl Transfer {
                         .begin_command_buffer(transfer_ctx.command_buffer, &begin_info)?
                 };
 
-                if !transfer_ctx.pre_barriers.is_empty() {
-                    todo!("pre barriers are unimplemented");
-                }
-                for _barrier in transfer_ctx.pre_barriers.drain(..) {
-                    todo!(); // TODO: not needed for buffer uploads, come back later for texture uploads
+                unsafe {
+                    self.device.inner.cmd_pipeline_barrier(
+                        transfer_ctx.command_buffer,
+                        vk::PipelineStageFlags::HOST,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &transfer_ctx.pre_barriers.buffer,
+                        &transfer_ctx.pre_barriers.image,
+                    )
                 }
 
-                for copy in transfer_ctx.pending_copies.drain(..) {
-                    let regions = [vk::BufferCopy {
-                        src_offset: copy.src.offset,
-                        dst_offset: copy.dst.offset,
-                        size: copy.src.size,
-                    }];
+                for copy in transfer_ctx.pending_buffer_copies.drain(..) {
+                    let regions = std::slice::from_ref(&copy.copy);
 
                     unsafe {
                         self.device.inner.cmd_copy_buffer(
                             transfer_ctx.command_buffer,
-                            copy.src.buffer,
-                            copy.dst.buffer,
+                            copy.src,
+                            copy.dst,
                             &regions,
                         );
                     }
                 }
 
+                for copy in transfer_ctx.pending_image_copies.drain(..) {
+                    unsafe {
+                        self.device.inner.cmd_copy_buffer_to_image(
+                            transfer_ctx.command_buffer,
+                            copy.src.buffer,
+                            copy.dst_image,
+                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                            std::slice::from_ref(&copy.copy_op),
+                        );
+                    }
+                }
+
                 unsafe {
-                    // TODO: come back here for image barriers
                     self.device.inner.cmd_pipeline_barrier(
                         transfer_ctx.command_buffer,
                         vk::PipelineStageFlags::TRANSFER,
                         vk::PipelineStageFlags::BOTTOM_OF_PIPE,
                         vk::DependencyFlags::empty(),
                         &[],
-                        &transfer_ctx.post_barriers,
-                        &[],
+                        &transfer_ctx.post_barriers.buffer,
+                        &transfer_ctx.post_barriers.image,
                     )
                 }
 
@@ -312,25 +461,14 @@ impl Transfer {
                     .begin_command_buffer(gfx_ctx.command_buffer, &begin_info)?
             };
 
-            if !gfx_ctx.pre_barriers.is_empty() {
-                todo!("pre barriers are unimplemented");
-            }
-            for _barrier in gfx_ctx.pre_barriers.drain(..) {
-                todo!(); // TODO: not needed for buffer uploads, come back later for texture uploads
-            }
-
-            for copy in gfx_ctx.pending_copies.drain(..) {
-                let regions = [vk::BufferCopy {
-                    src_offset: copy.src.offset,
-                    dst_offset: copy.dst.offset,
-                    size: copy.src.size,
-                }];
+            for copy in gfx_ctx.pending_buffer_copies.drain(..) {
+                let regions = std::slice::from_ref(&copy.copy);
 
                 unsafe {
                     self.device.inner.cmd_copy_buffer(
                         gfx_ctx.command_buffer,
-                        copy.src.buffer,
-                        copy.dst.buffer,
+                        copy.src,
+                        copy.dst,
                         &regions,
                     );
                 }
@@ -344,8 +482,8 @@ impl Transfer {
                     vk::PipelineStageFlags::ALL_COMMANDS,
                     vk::DependencyFlags::empty(),
                     &[],
-                    &gfx_ctx.post_barriers,
-                    &[],
+                    &gfx_ctx.post_barriers.buffer,
+                    &gfx_ctx.post_barriers.image,
                 )
             }
 

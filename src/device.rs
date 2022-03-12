@@ -1,8 +1,7 @@
-use std::error::Error;
 use std::ops::Deref;
 use std::rc::Rc;
 
-use ash::extensions::khr::TimelineSemaphore;
+use ash::extensions::khr::{DynamicRendering, TimelineSemaphore};
 use ash::vk::{Semaphore, SemaphoreCreateInfo, SemaphoreType, SemaphoreTypeCreateInfo};
 use ash::{extensions::khr::Swapchain as KhrSwapchain, prelude::VkResult, vk, Device as VkDevice};
 
@@ -39,6 +38,7 @@ impl Drop for RawDevice {
 pub struct Device {
     pub inner: Rc<RawDevice>,
     pub timeline_semaphore: TimelineSemaphore,
+    pub dynamic_rendering: DynamicRendering,
     pub physical_device: vk::PhysicalDevice,
     pub graphics_queue: Rc<Queue>,
     pub transfer_queue: Rc<Queue>,
@@ -59,8 +59,7 @@ impl Device {
         surface: &Surface,
         desired_present_mode: vk::PresentModeKHR,
     ) -> VkResult<Self> {
-        let selected_device_info =
-            Device::pick_vk_device(&instance, &surface, desired_present_mode)?;
+        let selected_device_info = Device::pick_vk_device(instance, surface, desired_present_mode)?;
 
         // FIXME: this should be recoverable (probably)
         let selected_device_info = selected_device_info.expect("no suitable vulkan device");
@@ -90,11 +89,14 @@ impl Device {
 
         let mut timeline_semaphores_features =
             vk::PhysicalDeviceTimelineSemaphoreFeaturesKHR::builder().timeline_semaphore(true);
+        let mut dynamic_rendering_features =
+            vk::PhysicalDeviceDynamicRenderingFeaturesKHR::builder().dynamic_rendering(true);
         let device_features_builder = vk::PhysicalDeviceFeatures::builder();
 
         let device_extensions = [
             KhrSwapchain::name().as_ptr(),
             TimelineSemaphore::name().as_ptr(),
+            DynamicRendering::name().as_ptr(),
         ];
 
         let create_device_info_builder = vk::DeviceCreateInfo::builder()
@@ -103,7 +105,8 @@ impl Device {
             .enabled_layer_names(&instance.layers)
             .enabled_extension_names(&device_extensions)
             .enabled_features(&device_features_builder)
-            .push_next(&mut timeline_semaphores_features);
+            .push_next(&mut timeline_semaphores_features)
+            .push_next(&mut dynamic_rendering_features);
 
         let raw_device = Rc::new(RawDevice {
             inner: unsafe {
@@ -131,11 +134,14 @@ impl Device {
         )?);
 
         let timeline_semaphore = TimelineSemaphore::new(&instance.inner, &raw_device);
+        let dynamic_rendering = DynamicRendering::new(&instance.inner, &raw_device);
+
         Ok(Self {
             inner: raw_device,
             physical_device,
             graphics_queue,
             timeline_semaphore,
+            dynamic_rendering,
             transfer_queue,
         })
     }
@@ -258,4 +264,39 @@ impl Device {
 
         unsafe { self.inner.create_semaphore(&semaphore_create_info, None) }
     }
+
+    pub fn insert_image_barrier(&self, params: &ImageBarrierParameters) {
+        unsafe {
+            self.inner.cmd_pipeline_barrier(
+                params.command_buffer,
+                params.src_stage_mask,
+                params.dst_stage_mask,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                std::slice::from_ref(
+                    &vk::ImageMemoryBarrier::builder()
+                        .old_layout(params.old_layout)
+                        .new_layout(params.new_layout)
+                        .src_access_mask(params.src_access_mask)
+                        .dst_access_mask(params.dst_access_mask)
+                        .image(params.image)
+                        .subresource_range(params.subresource_range)
+                        .build(),
+                ),
+            )
+        }
+    }
+}
+
+pub struct ImageBarrierParameters {
+    pub command_buffer: vk::CommandBuffer,
+    pub image: vk::Image,
+    pub src_access_mask: vk::AccessFlags,
+    pub dst_access_mask: vk::AccessFlags,
+    pub old_layout: vk::ImageLayout,
+    pub new_layout: vk::ImageLayout,
+    pub src_stage_mask: vk::PipelineStageFlags,
+    pub dst_stage_mask: vk::PipelineStageFlags,
+    pub subresource_range: vk::ImageSubresourceRange,
 }

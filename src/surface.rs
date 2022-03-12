@@ -1,6 +1,6 @@
 use crate::instance::Instance;
 
-use ash::{extensions::khr::Surface as SurfaceLoader, prelude::VkResult, vk, vk::Handle, Entry};
+use ash::{extensions::khr::Surface as SurfaceLoader, prelude::VkResult, vk, vk::Handle};
 
 pub struct Surface {
     pub surface: vk::SurfaceKHR,

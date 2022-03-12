@@ -6,8 +6,8 @@ use crate::surface::Surface;
 
 pub(crate) struct ImageResources {
     pub(crate) fence: vk::Fence,
-    pub(crate) framebuffer: vk::Framebuffer,
     pub(crate) image_view: vk::ImageView,
+    pub(crate) image: vk::Image,
 }
 
 pub(crate) struct SwapchainSupportInfo {
@@ -69,7 +69,6 @@ impl Swapchain {
         surface: &Surface,
         desired_extent: vk::Extent2D,
         present_mode: vk::PresentModeKHR,
-        render_pass: vk::RenderPass,
     ) -> VkResult<Self> {
         let loader = SwapchainLoader::new(&instance.inner, &device.inner.inner);
 
@@ -119,23 +118,8 @@ impl Swapchain {
                 let image_view =
                     unsafe { device.inner.create_image_view(&create_view_info, None)? };
 
-                let attachments = [image_view];
-
-                let framebuffer_create_info = vk::FramebufferCreateInfo::builder()
-                    .render_pass(render_pass)
-                    .attachments(&attachments)
-                    .width(extent.width)
-                    .height(extent.height)
-                    .layers(1);
-
-                let framebuffer = unsafe {
-                    device
-                        .inner
-                        .create_framebuffer(&framebuffer_create_info, None)
-                }?;
-
                 Ok(ImageResources {
-                    framebuffer,
+                    image,
                     image_view,
                     fence: vk::Fence::null(),
                 })

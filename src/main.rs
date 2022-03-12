@@ -8,13 +8,15 @@ use sdl2::event::Event;
 use std::error::Error;
 use std::ffi::CStr;
 use std::fmt::Debug;
+use std::fs::File;
 use std::rc::Rc;
 
 use memoffset::offset_of;
 
 use glam::{Mat4, Vec3};
 
-mod allocator;
+use gpu_allocator::vulkan::{Allocation, Allocator};
+
 mod buffer;
 mod surface;
 mod swapchain;
@@ -27,7 +29,17 @@ use device::Device;
 
 mod queue;
 
+mod allocator;
+mod loader;
+mod sampler;
+mod texture;
+mod texture_view;
 mod transfer;
+
+use crate::device::ImageBarrierParameters;
+use crate::loader::load_png;
+use crate::texture::Texture;
+use crate::texture_view::TextureView;
 use transfer::Transfer;
 
 // kinda lifted from DXVK's Presenter
@@ -36,7 +48,7 @@ struct FrameResources {
     render_finished: vk::Semaphore,
     fence: vk::Fence,
     command_buffer: vk::CommandBuffer,
-    uniform_buffer_allocation: allocator::Allocation,
+    uniform_buffer_allocation: Allocation,
     uniform_buffer: buffer::Buffer,
     descriptor_set: vk::DescriptorSet,
 }
@@ -45,7 +57,7 @@ struct Application {
     desired_extent: vk::Extent2D,
     desired_present_mode: vk::PresentModeKHR,
     sdl_ctx: sdl2::Sdl,
-    sdl_video_ctx: sdl2::VideoSubsystem,
+    _sdl_video_ctx: sdl2::VideoSubsystem,
     window: sdl2::video::Window,
     swapchain: swapchain::Swapchain,
     allocator: Rc<allocator::Allocator>,
@@ -56,11 +68,12 @@ struct Application {
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
     descriptor_set_layout: vk::DescriptorSetLayout,
-    render_pass: vk::RenderPass,
     current_frame: usize,
     vertex_buffer: buffer::Buffer,
     index_buffer: buffer::Buffer,
     descriptor_pool: vk::DescriptorPool,
+    test_texture: (TextureView, Allocation),
+    linear_sampler: sampler::Sampler,
     frame_count: usize,
     instance: Instance,
 }
@@ -70,6 +83,7 @@ struct Application {
 struct Vertex {
     pos: [f32; 2],
     color: [f32; 3],
+    uv: [f32; 2],
 }
 
 #[repr(C)]
@@ -88,7 +102,7 @@ impl Vertex {
         }
     }
 
-    fn get_attribute_descriptors() -> [vk::VertexInputAttributeDescription; 2] {
+    fn get_attribute_descriptors() -> [vk::VertexInputAttributeDescription; 3] {
         [
             vk::VertexInputAttributeDescription {
                 binding: 0,
@@ -102,6 +116,12 @@ impl Vertex {
                 format: vk::Format::R32G32B32_SFLOAT,
                 offset: offset_of!(Vertex, color) as u32,
             },
+            vk::VertexInputAttributeDescription {
+                binding: 0,
+                location: 2,
+                format: vk::Format::R32G32_SFLOAT,
+                offset: offset_of!(Vertex, uv) as u32,
+            }
         ]
     }
 }
@@ -136,7 +156,7 @@ impl Application {
             desired_present_mode,
         )?);
 
-        let allocator = Rc::new(allocator::Allocator::new(&device, &instance));
+        let allocator = Rc::new(allocator::Allocator::new(device.clone(), &instance));
 
         let mut transfer = Transfer::new(
             device.clone(),
@@ -145,15 +165,12 @@ impl Application {
             Some(device.transfer_queue.clone()),
         )?;
 
-        let render_pass = Application::create_render_pass(&device)?;
-
         let swapchain = swapchain::Swapchain::new(
             &instance,
             &device,
             &surface,
             desired_extent,
             desired_present_mode,
-            render_pass,
         )?;
 
         let mut frame_resources: Vec<FrameResources> = (0..FRAMES_IN_FLIGHT)
@@ -212,18 +229,22 @@ impl Application {
             Vertex {
                 pos: [-0.5, -0.5],
                 color: [1.0, 0.0, 0.0],
+                uv: [1.0, 0.0],
             },
             Vertex {
                 pos: [0.5, -0.5],
                 color: [0.0, 1.0, 0.0],
+                uv: [0.0, 0.0],
             },
             Vertex {
                 pos: [0.5, 0.5],
                 color: [0.0, 0.0, 1.0],
+                uv: [0.0, 1.0],
             },
             Vertex {
                 pos: [-0.5, 0.5],
                 color: [1.0, 1.0, 1.0],
+                uv: [1.0, 1.0],
             },
         ];
 
@@ -237,7 +258,7 @@ impl Application {
             .usage(vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
-        let (vertex_buffer, vertex_buffer_allocation) =
+        let (vertex_buffer, _vertex_buffer_allocation) =
             allocator.create_buffer(&vertex_buffer_info, allocator::MemoryUsage::DeviceOnly)?;
 
         let index_buffer_info = vk::BufferCreateInfo::builder()
@@ -245,7 +266,7 @@ impl Application {
             .usage(vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
-        let (index_buffer, index_buffer_allocation) =
+        let (index_buffer, _index_buffer_allocation) =
             allocator.create_buffer(&index_buffer_info, allocator::MemoryUsage::DeviceOnly)?;
 
         transfer.upload_buffer(&vertices, &vertex_buffer)?;
@@ -253,15 +274,23 @@ impl Application {
 
         transfer.flush()?;
 
-        let pool_sizes = [vk::DescriptorPoolSize {
-            descriptor_count: FRAMES_IN_FLIGHT as u32,
-            ty: vk::DescriptorType::UNIFORM_BUFFER,
-        }];
+        const DESCRIPTOR_POOL_SIZE: u32 = 128;
+
+        let pool_sizes = [
+            vk::DescriptorPoolSize {
+                descriptor_count: DESCRIPTOR_POOL_SIZE,
+                ty: vk::DescriptorType::UNIFORM_BUFFER,
+            },
+            vk::DescriptorPoolSize {
+                descriptor_count: DESCRIPTOR_POOL_SIZE,
+                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+            },
+        ];
 
         let pool_create_info = vk::DescriptorPoolCreateInfo::builder()
             .pool_sizes(&pool_sizes)
             .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET)
-            .max_sets(FRAMES_IN_FLIGHT as u32);
+            .max_sets(DESCRIPTOR_POOL_SIZE);
 
         let descriptor_pool = unsafe {
             device
@@ -274,7 +303,6 @@ impl Application {
         let (pipeline_layout, pipeline) = Application::create_graphics_pipeline(
             &device,
             swapchain.extent,
-            render_pass,
             &[descriptor_set_layout],
         )?;
 
@@ -290,6 +318,24 @@ impl Application {
                 .allocate_descriptor_sets(&descriptor_set_alloc_info)?
         };
 
+        let test_texture = load_png(
+            device.clone(),
+            &mut File::open("./smile.png").unwrap(),
+            &allocator,
+            &mut transfer,
+        );
+
+        let linear_sampler = sampler::Sampler::new(
+            device.clone(),
+            vk::SamplerCreateInfo::builder()
+                .mag_filter(vk::Filter::LINEAR)
+                .min_filter(vk::Filter::LINEAR)
+                .address_mode_u(vk::SamplerAddressMode::REPEAT)
+                .address_mode_v(vk::SamplerAddressMode::REPEAT)
+                .address_mode_w(vk::SamplerAddressMode::REPEAT)
+                .build(),
+        )?;
+
         for (i, &set) in sets.iter().enumerate() {
             let frame = &mut frame_resources[i];
             frame.descriptor_set = set; // side effects, yey!
@@ -300,16 +346,30 @@ impl Application {
                 range: std::mem::size_of::<Ubo>() as u64,
             }];
 
-            let update = vk::WriteDescriptorSet::builder()
-                .dst_set(frame.descriptor_set)
-                .dst_binding(0)
-                .dst_array_element(0)
-                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                .buffer_info(&buffer_infos)
-                .build();
+            let image_info = vk::DescriptorImageInfo::builder()
+                .image_view(test_texture.0.inner)
+                .sampler(linear_sampler.inner)
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+
+            let updates = [
+                vk::WriteDescriptorSet::builder()
+                    .dst_set(frame.descriptor_set)
+                    .dst_binding(0)
+                    .dst_array_element(0)
+                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                    .buffer_info(&buffer_infos)
+                    .build(),
+                vk::WriteDescriptorSet::builder()
+                    .dst_set(frame.descriptor_set)
+                    .dst_binding(1)
+                    .dst_array_element(0)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .image_info(std::slice::from_ref(&image_info))
+                    .build(),
+            ];
 
             unsafe {
-                device.inner.update_descriptor_sets(&[update], &[]);
+                device.inner.update_descriptor_sets(&updates, &[]);
             }
         }
 
@@ -329,13 +389,12 @@ impl Application {
             current_frame: 0,
             sdl_ctx,
             instance,
-            sdl_video_ctx,
+            _sdl_video_ctx: sdl_video_ctx,
             window,
             device,
             surface,
             swapchain,
             frame_resources,
-            render_pass,
             pipeline_layout,
             pipeline,
             descriptor_set_layout,
@@ -345,6 +404,8 @@ impl Application {
             frame_count: 0,
             allocator,
             transfer,
+            test_texture,
+            linear_sampler,
         };
 
         Ok(app)
@@ -363,59 +424,21 @@ impl Application {
         })
     }
 
-    fn create_render_pass(device: &Device) -> Result<vk::RenderPass, Box<dyn Error>> {
-        let renderpass_attachmnents = [vk::AttachmentDescription {
-            format: vk::Format::B8G8R8A8_SRGB,
-            samples: vk::SampleCountFlags::TYPE_1,
-            store_op: vk::AttachmentStoreOp::STORE,
-            load_op: vk::AttachmentLoadOp::CLEAR,
-            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
-            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
-            initial_layout: vk::ImageLayout::UNDEFINED,
-            final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
-            ..Default::default()
-        }];
-
-        let color_attachment_refs = [vk::AttachmentReference {
-            attachment: 0,
-            layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-        }];
-
-        let subpasses = [vk::SubpassDescription::builder()
-            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-            .color_attachments(&color_attachment_refs)
-            .build()];
-
-        let dependencies = [vk::SubpassDependency {
-            src_subpass: vk::SUBPASS_EXTERNAL,
-            dst_subpass: 0,
-            src_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-            dst_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-            dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-            ..Default::default()
-        }];
-
-        let renderpass_create_info = vk::RenderPassCreateInfo::builder()
-            .attachments(&renderpass_attachmnents)
-            .subpasses(&subpasses)
-            .dependencies(&dependencies);
-
-        let renderpass = unsafe {
-            device
-                .inner
-                .create_render_pass(&renderpass_create_info, None)?
-        };
-
-        Ok(renderpass)
-    }
-
     fn create_descriptor_set_layout(device: &Device) -> VkResult<vk::DescriptorSetLayout> {
-        let layout_bindings = [vk::DescriptorSetLayoutBinding::builder()
-            .binding(0)
-            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::VERTEX)
-            .build()];
+        let layout_bindings = [
+            vk::DescriptorSetLayoutBinding::builder()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::VERTEX)
+                .build(),
+            vk::DescriptorSetLayoutBinding::builder()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+                .build(),
+        ];
 
         let layout_create_info =
             vk::DescriptorSetLayoutCreateInfo::builder().bindings(&layout_bindings);
@@ -430,7 +453,6 @@ impl Application {
     fn create_graphics_pipeline(
         device: &Device,
         swapchain_extent: vk::Extent2D,
-        render_pass: vk::RenderPass,
         descriptor_set_layouts: &[vk::DescriptorSetLayout],
     ) -> Result<(vk::PipelineLayout, vk::Pipeline), Box<dyn Error>> {
         let raw_vs = include_bytes!("../vert.spv");
@@ -514,7 +536,7 @@ impl Application {
             .attachments(&color_blend_attachment_states);
 
         let pipeline_layout_info =
-            vk::PipelineLayoutCreateInfo::builder().set_layouts(&descriptor_set_layouts);
+            vk::PipelineLayoutCreateInfo::builder().set_layouts(descriptor_set_layouts);
 
         let pipeline_layout = unsafe {
             device
@@ -522,7 +544,12 @@ impl Application {
                 .create_pipeline_layout(&pipeline_layout_info, None)?
         };
 
-        let pipeline_create_infos = [vk::GraphicsPipelineCreateInfo::builder()
+        let mut pipeline_rendering_info = vk::PipelineRenderingCreateInfoKHR::builder()
+            .color_attachment_formats(&[vk::Format::B8G8R8A8_SRGB])
+            .depth_attachment_format(vk::Format::UNDEFINED)
+            .stencil_attachment_format(vk::Format::UNDEFINED);
+
+        let pipeline_create_infos = vk::GraphicsPipelineCreateInfo::builder()
             .stages(&stages)
             .vertex_input_state(&vertex_input_info)
             .input_assembly_state(&input_assembly_info)
@@ -531,14 +558,17 @@ impl Application {
             .multisample_state(&multisampler_state)
             .color_blend_state(&color_blend_state)
             .layout(pipeline_layout)
-            .render_pass(render_pass)
-            .subpass(0)
-            .build()];
+            .render_pass(vk::RenderPass::null())
+            .push_next(&mut pipeline_rendering_info);
 
         let pipelines = unsafe {
             device
                 .inner
-                .create_graphics_pipelines(vk::PipelineCache::null(), &pipeline_create_infos, None)
+                .create_graphics_pipelines(
+                    vk::PipelineCache::null(),
+                    std::slice::from_ref(&pipeline_create_infos),
+                    None,
+                )
                 .unwrap()
         };
 
@@ -579,7 +609,7 @@ impl Application {
         Ok(())
     }
 
-    fn update_ubos(&mut self) -> VkResult<()> {
+    fn update_ubos(&self) -> VkResult<()> {
         let mapped = self
             .allocator
             .map(&self.frame_resources[self.current_frame].uniform_buffer_allocation)?
@@ -590,7 +620,7 @@ impl Application {
         let model = Mat4::from_rotation_z((self.frame_count as f32).to_radians());
 
         let view = Mat4::look_at_lh(
-            Vec3::new(2.0, 2.0, 2.0),
+            Vec3::new(0.1, 0.1, 1.0),
             Vec3::new(0.0, 0.0, 0.0),
             Vec3::new(0.0, 0.0, 1.0),
         );
@@ -638,7 +668,7 @@ impl Application {
             return Ok(());
         }
 
-        let image_resources = &mut self.swapchain.image_resources[image_index as usize];
+        let mut image_resources = &mut self.swapchain.image_resources[image_index as usize];
 
         if image_resources.fence != vk::Fence::null() {
             let wait_fences = [image_resources.fence];
@@ -650,6 +680,8 @@ impl Application {
         }
 
         image_resources.fence = self.frame_resources[self.current_frame].fence;
+
+        let image_resources = &self.swapchain.image_resources[image_index as usize];
 
         let command_buffer = self.frame_resources[self.current_frame].command_buffer;
 
@@ -663,29 +695,50 @@ impl Application {
                 .begin_command_buffer(command_buffer, &vk::CommandBufferBeginInfo::builder())?;
         }
 
-        let clear_values = [vk::ClearValue {
+        let clear_value = vk::ClearValue {
             color: vk::ClearColorValue {
                 float32: [0.0, 0.0, 0.0, 1.0],
             },
-        }];
+        };
 
-        let render_pass_begin_info = vk::RenderPassBeginInfo::builder()
-            .render_pass(self.render_pass)
-            .framebuffer(image_resources.framebuffer)
-            .render_area(vk::Rect2D {
-                extent: self.swapchain.extent,
-                offset: vk::Offset2D { x: 0, y: 0 },
-            })
-            .clear_values(&clear_values);
+        let attachment = vk::RenderingAttachmentInfoKHR::builder()
+            .clear_value(clear_value)
+            .image_view(image_resources.image_view)
+            .image_layout(vk::ImageLayout::ATTACHMENT_OPTIMAL_KHR)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::STORE);
+
+        let rendering_info = vk::RenderingInfoKHR::builder()
+            .render_area(vk::Rect2D::builder().extent(self.swapchain.extent).build())
+            .layer_count(1)
+            .view_mask(0)
+            .color_attachments(std::slice::from_ref(&attachment));
 
         self.update_ubos()?;
 
         unsafe {
-            self.device.inner.cmd_begin_render_pass(
+            self.device.insert_image_barrier(&ImageBarrierParameters {
                 command_buffer,
-                &render_pass_begin_info,
-                vk::SubpassContents::INLINE,
-            );
+                src_stage_mask: vk::PipelineStageFlags::TOP_OF_PIPE,
+                dst_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                old_layout: vk::ImageLayout::UNDEFINED,
+                new_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                src_access_mask: vk::AccessFlags::empty(),
+                dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                image: image_resources.image,
+                subresource_range: vk::ImageSubresourceRange::builder()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(1)
+                    .build(),
+            });
+
+            self.device
+                .dynamic_rendering
+                .cmd_begin_rendering(command_buffer, &rendering_info);
+
             self.device.inner.cmd_bind_pipeline(
                 command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
@@ -718,7 +771,28 @@ impl Application {
             self.device
                 .inner
                 .cmd_draw_indexed(command_buffer, 6, 1, 0, 0, 0);
-            self.device.inner.cmd_end_render_pass(command_buffer);
+            self.device
+                .dynamic_rendering
+                .cmd_end_rendering(command_buffer);
+
+            self.device.insert_image_barrier(&ImageBarrierParameters {
+                command_buffer,
+                src_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                dst_stage_mask: vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                old_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                new_layout: vk::ImageLayout::PRESENT_SRC_KHR,
+                src_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                dst_access_mask: vk::AccessFlags::empty(),
+                image: image_resources.image,
+                subresource_range: vk::ImageSubresourceRange::builder()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(1)
+                    .build(),
+            });
+
             self.device.inner.end_command_buffer(command_buffer)?;
         }
 
@@ -779,20 +853,17 @@ impl Application {
 
         self.drop_swapchain();
 
-        self.render_pass = Application::create_render_pass(&self.device)?;
         self.swapchain = swapchain::Swapchain::new(
             &self.instance,
             &self.device,
             &self.surface,
             self.desired_extent,
             self.desired_present_mode,
-            self.render_pass,
         )?;
 
         let pipeline_double = Application::create_graphics_pipeline(
             &self.device,
             self.swapchain.extent,
-            self.render_pass,
             &[self.descriptor_set_layout],
         )?;
 
@@ -807,9 +878,6 @@ impl Application {
             for image_resources in &self.swapchain.image_resources {
                 self.device
                     .inner
-                    .destroy_framebuffer(image_resources.framebuffer, None);
-                self.device
-                    .inner
                     .destroy_image_view(image_resources.image_view, None);
             }
 
@@ -821,9 +889,6 @@ impl Application {
             self.device
                 .inner
                 .destroy_pipeline_layout(self.pipeline_layout, None);
-            self.device
-                .inner
-                .destroy_render_pass(self.render_pass, None);
         }
     }
 }
@@ -857,7 +922,8 @@ impl Drop for Application {
 
             self.device
                 .inner
-                .free_descriptor_sets(self.descriptor_pool, &sets);
+                .free_descriptor_sets(self.descriptor_pool, &sets)
+                .unwrap();
 
             self.device
                 .inner

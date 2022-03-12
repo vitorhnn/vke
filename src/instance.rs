@@ -22,9 +22,9 @@ impl Instance {
         let entry = unsafe { Entry::load()? };
 
         let app_info = vk::ApplicationInfo::builder()
-            .application_name(&APPLICATION_NAME)
+            .application_name(APPLICATION_NAME)
             .application_version(vk::make_api_version(0, 0, 1, 0))
-            .engine_name(&APPLICATION_NAME)
+            .engine_name(APPLICATION_NAME)
             .engine_version(vk::make_api_version(0, 0, 1, 0))
             .api_version(vk::make_api_version(0, 1, 1, 0));
 
@@ -37,7 +37,7 @@ impl Instance {
                 smallvec![]
             };
 
-        let enabled_extensions = Instance::get_vulkan_instance_extensions(&window);
+        let enabled_extensions = Instance::get_vulkan_instance_extensions(window);
 
         let create_info_builder = vk::InstanceCreateInfo::builder()
             .application_info(&app_info)
