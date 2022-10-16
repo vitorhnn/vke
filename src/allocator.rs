@@ -154,4 +154,10 @@ impl Allocator {
     pub fn unmap(&self, _allocation: &Allocation) {
         eprintln!("unmap does nothing currently");
     }
+
+    pub fn free(&self, allocation: Allocation) {
+        let mut allocator = self.inner.lock();
+
+        allocator.free(allocation);
+    }
 }

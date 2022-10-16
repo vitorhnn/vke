@@ -5,6 +5,12 @@ use ash::vk;
 use gpu_allocator::vulkan::Allocation;
 use std::rc::Rc;
 
+#[derive(Debug)]
+pub struct TextureInfo {
+    pub extent: vk::Extent3D,
+    pub format: vk::Format,
+}
+
 pub struct Texture {
     pub image: vk::Image,
     device: Rc<Device>,

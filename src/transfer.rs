@@ -171,7 +171,7 @@ impl Transfer {
 
     fn upload_to_staging_buffer<T, F>(&mut self, callback: F) -> (usize, usize)
     where
-        T: Copy,
+        T: Clone,
         F: FnOnce(&mut [T]) -> usize,
     {
         unsafe {
@@ -194,7 +194,7 @@ impl Transfer {
 
     pub fn upload_buffer_callback<T, F>(&mut self, callback: F, dest: &Buffer) -> VkResult<()>
     where
-        T: Copy,
+        T: Clone,
         F: FnOnce(&mut [T]) -> usize,
     {
         let (written, start_of_data) = self.upload_to_staging_buffer(callback);

@@ -15,3 +15,10 @@ png = "0.17"
 parking_lot = "0.12"
 smallvec = "1"
 gpu-allocator = "0.16.0"
+gltf = { version = "1", features = ["KHR_lights_punctual"]}
+snafu = "0.7"
+itertools = "0.10.3"
+serde = { version = "1", features = ["derive"] }
+
+[profile.dev]
+opt-level=1

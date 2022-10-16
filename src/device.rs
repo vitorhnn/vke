@@ -1,8 +1,11 @@
 use std::ops::Deref;
 use std::rc::Rc;
 
-use ash::extensions::khr::{DynamicRendering, TimelineSemaphore};
-use ash::vk::{Semaphore, SemaphoreCreateInfo, SemaphoreType, SemaphoreTypeCreateInfo};
+use ash::extensions::khr::{CreateRenderPass2, DynamicRendering, TimelineSemaphore};
+use ash::vk::{
+    KhrDepthStencilResolveFn, Semaphore, SemaphoreCreateInfo, SemaphoreType,
+    SemaphoreTypeCreateInfo,
+};
 use ash::{extensions::khr::Swapchain as KhrSwapchain, prelude::VkResult, vk, Device as VkDevice};
 
 use crate::instance::Instance;
@@ -97,6 +100,8 @@ impl Device {
             KhrSwapchain::name().as_ptr(),
             TimelineSemaphore::name().as_ptr(),
             DynamicRendering::name().as_ptr(),
+            CreateRenderPass2::name().as_ptr(),
+            KhrDepthStencilResolveFn::name().as_ptr(),
         ];
 
         let create_device_info_builder = vk::DeviceCreateInfo::builder()

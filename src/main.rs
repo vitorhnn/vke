@@ -2,6 +2,7 @@
 #![feature(try_find)]
 
 use ash::{prelude::VkResult, vk};
+use std::borrow::BorrowMut;
 
 use sdl2::event::Event;
 
@@ -9,6 +10,7 @@ use std::error::Error;
 use std::ffi::CStr;
 use std::fmt::Debug;
 use std::fs::File;
+use std::path::Path;
 use std::rc::Rc;
 
 use memoffset::offset_of;
@@ -16,6 +18,7 @@ use memoffset::offset_of;
 use glam::{Mat4, Vec3};
 
 use gpu_allocator::vulkan::{Allocation, Allocator};
+use sdl2::video::FullscreenType;
 
 mod buffer;
 mod surface;
@@ -30,6 +33,9 @@ use device::Device;
 mod queue;
 
 mod allocator;
+mod asset;
+mod fly_camera;
+mod input;
 mod loader;
 mod sampler;
 mod texture;
@@ -37,7 +43,7 @@ mod texture_view;
 mod transfer;
 
 use crate::device::ImageBarrierParameters;
-use crate::loader::load_png;
+use crate::loader::{load_png, World};
 use crate::texture::Texture;
 use crate::texture_view::TextureView;
 use transfer::Transfer;
@@ -69,27 +75,30 @@ struct Application {
     pipeline: vk::Pipeline,
     descriptor_set_layout: vk::DescriptorSetLayout,
     current_frame: usize,
-    vertex_buffer: buffer::Buffer,
-    index_buffer: buffer::Buffer,
     descriptor_pool: vk::DescriptorPool,
     test_texture: (TextureView, Allocation),
     linear_sampler: sampler::Sampler,
     frame_count: usize,
+    world: World,
     instance: Instance,
+    input_state: input::InputState,
+    fly_camera: fly_camera::FlyCamera,
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct Vertex {
-    pos: [f32; 2],
-    color: [f32; 3],
+    pos: [f32; 3],
     uv: [f32; 2],
+    normal: [f32; 3],
+    tangent: [f32; 4],
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Default)]
 struct Ubo {
-    model_view: Mat4,
+    model: Mat4,
+    view: Mat4,
     projection: Mat4,
 }
 
@@ -102,26 +111,32 @@ impl Vertex {
         }
     }
 
-    fn get_attribute_descriptors() -> [vk::VertexInputAttributeDescription; 3] {
+    fn get_attribute_descriptors() -> [vk::VertexInputAttributeDescription; 4] {
         [
             vk::VertexInputAttributeDescription {
                 binding: 0,
                 location: 0,
-                format: vk::Format::R32G32_SFLOAT,
+                format: vk::Format::R32G32B32_SFLOAT,
                 offset: offset_of!(Vertex, pos) as u32,
             },
             vk::VertexInputAttributeDescription {
                 binding: 0,
                 location: 1,
-                format: vk::Format::R32G32B32_SFLOAT,
-                offset: offset_of!(Vertex, color) as u32,
+                format: vk::Format::R32G32_SFLOAT,
+                offset: offset_of!(Vertex, uv) as u32,
             },
             vk::VertexInputAttributeDescription {
                 binding: 0,
                 location: 2,
                 format: vk::Format::R32G32_SFLOAT,
-                offset: offset_of!(Vertex, uv) as u32,
-            }
+                offset: offset_of!(Vertex, normal) as u32,
+            },
+            vk::VertexInputAttributeDescription {
+                binding: 0,
+                location: 3,
+                format: vk::Format::R32G32B32A32_SFLOAT,
+                offset: offset_of!(Vertex, tangent) as u32,
+            },
         ]
     }
 }
@@ -142,6 +157,8 @@ impl Application {
             .resizable()
             .vulkan()
             .build()?;
+
+        sdl_ctx.mouse().set_relative_mouse_mode(true);
 
         let instance = Instance::new(&window)?;
 
@@ -225,55 +242,6 @@ impl Application {
             })
             .collect::<Result<_, _>>()?;
 
-        let vertices = [
-            Vertex {
-                pos: [-0.5, -0.5],
-                color: [1.0, 0.0, 0.0],
-                uv: [1.0, 0.0],
-            },
-            Vertex {
-                pos: [0.5, -0.5],
-                color: [0.0, 1.0, 0.0],
-                uv: [0.0, 0.0],
-            },
-            Vertex {
-                pos: [0.5, 0.5],
-                color: [0.0, 0.0, 1.0],
-                uv: [0.0, 1.0],
-            },
-            Vertex {
-                pos: [-0.5, 0.5],
-                color: [1.0, 1.0, 1.0],
-                uv: [1.0, 1.0],
-            },
-        ];
-
-        let indices: [u16; 6] = [0, 1, 2, 2, 3, 0];
-
-        let vertex_buffer_size = std::mem::size_of_val(&vertices) as u64;
-        let index_buffer_size = std::mem::size_of_val(&indices) as u64;
-
-        let vertex_buffer_info = vk::BufferCreateInfo::builder()
-            .size(vertex_buffer_size)
-            .usage(vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE);
-
-        let (vertex_buffer, _vertex_buffer_allocation) =
-            allocator.create_buffer(&vertex_buffer_info, allocator::MemoryUsage::DeviceOnly)?;
-
-        let index_buffer_info = vk::BufferCreateInfo::builder()
-            .size(index_buffer_size)
-            .usage(vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE);
-
-        let (index_buffer, _index_buffer_allocation) =
-            allocator.create_buffer(&index_buffer_info, allocator::MemoryUsage::DeviceOnly)?;
-
-        transfer.upload_buffer(&vertices, &vertex_buffer)?;
-        transfer.upload_buffer(&indices, &index_buffer)?;
-
-        transfer.flush()?;
-
         const DESCRIPTOR_POOL_SIZE: u32 = 128;
 
         let pool_sizes = [
@@ -333,6 +301,8 @@ impl Application {
                 .address_mode_u(vk::SamplerAddressMode::REPEAT)
                 .address_mode_v(vk::SamplerAddressMode::REPEAT)
                 .address_mode_w(vk::SamplerAddressMode::REPEAT)
+                .compare_enable(true)
+                .compare_op(vk::CompareOp::ALWAYS)
                 .build(),
         )?;
 
@@ -373,6 +343,9 @@ impl Application {
             }
         }
 
+        let scene = asset::Scene::from_gltf(Path::new("./cube.glb"))?;
+        let world = loader::load_scene(allocator.clone(), &mut transfer, scene);
+
         println!("VKe: application created");
         println!(
             "graphics queue family index: {:#?}",
@@ -398,14 +371,15 @@ impl Application {
             pipeline_layout,
             pipeline,
             descriptor_set_layout,
-            vertex_buffer,
-            index_buffer,
             descriptor_pool,
             frame_count: 0,
             allocator,
             transfer,
             test_texture,
             linear_sampler,
+            world,
+            input_state: input::InputState::new(),
+            fly_camera: fly_camera::FlyCamera::new(),
         };
 
         Ok(app)
@@ -455,8 +429,8 @@ impl Application {
         swapchain_extent: vk::Extent2D,
         descriptor_set_layouts: &[vk::DescriptorSetLayout],
     ) -> Result<(vk::PipelineLayout, vk::Pipeline), Box<dyn Error>> {
-        let raw_vs = include_bytes!("../vert.spv");
-        let raw_fs = include_bytes!("../frag.spv");
+        let raw_vs = include_bytes!("../geometry.vert.spv");
+        let raw_fs = include_bytes!("../geometry.frag.spv");
 
         let vs_code = ash::util::read_spv(&mut std::io::Cursor::new(&raw_vs[..]))?;
         let fs_code = ash::util::read_spv(&mut std::io::Cursor::new(&raw_fs[..]))?;
@@ -513,7 +487,7 @@ impl Application {
             .polygon_mode(vk::PolygonMode::FILL)
             .line_width(1.0)
             .cull_mode(vk::CullModeFlags::BACK)
-            .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+            .front_face(vk::FrontFace::CLOCKWISE)
             .depth_bias_enable(false);
 
         let multisampler_state = vk::PipelineMultisampleStateCreateInfo::builder()
@@ -586,22 +560,18 @@ impl Application {
         let mut event_pump = self.sdl_ctx.event_pump()?;
 
         'running: loop {
-            for event in event_pump.poll_iter() {
-                match event {
-                    Event::Quit { .. } => {
-                        break 'running;
-                    }
-                    Event::Window { win_event, .. } => {
-                        use sdl2::event::WindowEvent;
-                        use sdl2::video::FullscreenType;
+            self.input_state.update(&mut event_pump);
 
-                        if let WindowEvent::Maximized = win_event {
-                            self.window.set_fullscreen(FullscreenType::True)?;
-                        }
-                    }
-                    _ => {}
-                }
+            if self.input_state.should_quit {
+                break 'running;
             }
+
+            if self.input_state.maximize {
+                self.window.set_fullscreen(FullscreenType::True);
+                self.input_state.maximize = false;
+            }
+
+            self.fly_camera.update(&mut self.input_state);
 
             self.draw()?;
         }
@@ -617,22 +587,16 @@ impl Application {
 
         let mut ubo = unsafe { &mut *mapped };
 
-        let model = Mat4::from_rotation_z((self.frame_count as f32).to_radians());
+        let model = Mat4::IDENTITY;
 
-        let view = Mat4::look_at_lh(
-            Vec3::new(0.1, 0.1, 1.0),
-            Vec3::new(0.0, 0.0, 0.0),
-            Vec3::new(0.0, 0.0, 1.0),
-        );
+        let view = self.fly_camera.get_matrix();
 
-        ubo.model_view = model * view;
+        ubo.model = model;
+        ubo.view = view;
 
-        ubo.projection = Mat4::perspective_lh(
-            f32::to_radians(45.0),
-            self.swapchain.extent.width as f32 / self.swapchain.extent.height as f32,
-            0.1,
-            10.0,
-        );
+        let aspect_ratio = self.swapchain.extent.width as f32 / self.swapchain.extent.height as f32;
+
+        ubo.projection = Mat4::perspective_infinite_rh(f32::to_radians(45.0), aspect_ratio, 0.1);
 
         Ok(())
     }
@@ -697,7 +661,7 @@ impl Application {
 
         let clear_value = vk::ClearValue {
             color: vk::ClearColorValue {
-                float32: [0.0, 0.0, 0.0, 1.0],
+                float32: [0.0, 1.0, 0.0, 1.0],
             },
         };
 
@@ -745,7 +709,7 @@ impl Application {
                 self.pipeline,
             );
 
-            let vertex_buffers = [self.vertex_buffer.inner];
+            let vertex_buffers = [self.world.models[0].meshes[0].buffer.inner];
             let offsets = [0];
 
             self.device
@@ -754,7 +718,7 @@ impl Application {
 
             self.device.inner.cmd_bind_index_buffer(
                 command_buffer,
-                self.index_buffer.inner,
+                self.world.models[0].meshes[0].idx_buffer.inner,
                 0,
                 vk::IndexType::UINT16,
             );
@@ -768,9 +732,14 @@ impl Application {
                 &[],
             );
 
-            self.device
-                .inner
-                .cmd_draw_indexed(command_buffer, 6, 1, 0, 0, 0);
+            self.device.inner.cmd_draw_indexed(
+                command_buffer,
+                self.world.models[0].meshes[0].idx_count,
+                1,
+                0,
+                0,
+                0,
+            );
             self.device
                 .dynamic_rendering
                 .cmd_end_rendering(command_buffer);
