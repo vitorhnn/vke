@@ -41,6 +41,7 @@ mod sampler;
 mod texture;
 mod texture_view;
 mod transfer;
+mod passes;
 
 use crate::device::ImageBarrierParameters;
 use crate::loader::{load_png, World};
@@ -48,16 +49,6 @@ use crate::texture::Texture;
 use crate::texture_view::TextureView;
 use transfer::Transfer;
 
-// kinda lifted from DXVK's Presenter
-struct FrameResources {
-    image_available: vk::Semaphore,
-    render_finished: vk::Semaphore,
-    fence: vk::Fence,
-    command_buffer: vk::CommandBuffer,
-    uniform_buffer_allocation: Allocation,
-    uniform_buffer: buffer::Buffer,
-    descriptor_set: vk::DescriptorSet,
-}
 
 struct Application {
     desired_extent: vk::Extent2D,
