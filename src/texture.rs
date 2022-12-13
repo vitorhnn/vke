@@ -29,6 +29,10 @@ impl Texture {
             allocation: None,
         })
     }
+
+    pub fn associate_allocation(&mut self, allocation: Allocation) {
+        self.allocation = Some(allocation);
+    }
 }
 
 impl Drop for Texture {

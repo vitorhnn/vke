@@ -1,3 +1,4 @@
+use std::ffi::CStr;
 use std::ops::Deref;
 use std::rc::Rc;
 
@@ -157,9 +158,10 @@ impl Device {
         surface: &Surface,
         desired_present_mode: vk::PresentModeKHR,
     ) -> VkResult<Option<SelectedDeviceInfo>> {
-        let is_device_suitable = |device: &vk::PhysicalDevice| -> VkResult<bool> {
+        let is_device_suitable = |props: &vk::PhysicalDeviceProperties,
+                                  device: &vk::PhysicalDevice|
+         -> VkResult<bool> {
             unsafe {
-                let props = instance.inner.get_physical_device_properties(*device);
                 let support_info = swapchain::SwapchainSupportInfo::get(*device, surface)?;
 
                 let suitable_swapchain_format = support_info.formats.into_iter().any(|format| {
@@ -206,7 +208,10 @@ impl Device {
         let devices = unsafe { instance.inner.enumerate_physical_devices()? };
 
         for device in devices {
-            if !is_device_suitable(&device)? {
+            let device_props = unsafe { instance.inner.get_physical_device_properties(device) };
+            let device_name = unsafe { CStr::from_ptr(device_props.device_name.as_ptr()) };
+            println!("evaluating device {:#?}", device_name);
+            if !is_device_suitable(&device_props, &device)? {
                 continue;
             }
 
@@ -253,6 +258,7 @@ impl Device {
             });
 
             if result.is_some() {
+                println!("device chosen");
                 return Ok(result);
             }
         }

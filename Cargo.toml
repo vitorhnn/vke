@@ -7,18 +7,22 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-ash = "0.35"
+ash = "0.37"
 sdl2 = "0.35"
 memoffset = "0.6"
 glam = "0.20"
 png = "0.17"
 parking_lot = "0.12"
 smallvec = "1"
-gpu-allocator = "0.16.0"
+gpu-allocator = "0.21"
 gltf = { version = "1", features = ["KHR_lights_punctual"]}
 snafu = "0.7"
 itertools = "0.10.3"
 serde = { version = "1", features = ["derive"] }
+shaderc = "0.8"
+serde_json = "1.0"
+spirv_cross = { version = "0.23", features = ["glsl"] }
+bitflags = { version = "2.0.0-rc.1", features = ["serde"] }
 
 [profile.dev]
 opt-level=1

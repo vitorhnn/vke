@@ -1,5 +1,7 @@
 // rust devs pls stabilize
 #![feature(try_find)]
+#![feature(maybe_uninit_uninit_array)]
+#![feature(maybe_uninit_array_assume_init)]
 
 use ash::{prelude::VkResult, vk};
 use std::borrow::BorrowMut;
@@ -37,11 +39,13 @@ mod asset;
 mod fly_camera;
 mod input;
 mod loader;
+mod material;
+mod passes;
 mod sampler;
 mod texture;
 mod texture_view;
 mod transfer;
-mod passes;
+mod per_frame;
 
 use crate::device::ImageBarrierParameters;
 use crate::loader::{load_png, World};
@@ -49,6 +53,15 @@ use crate::texture::Texture;
 use crate::texture_view::TextureView;
 use transfer::Transfer;
 
+struct FrameResources {
+    image_available: vk::Semaphore,
+    render_finished: vk::Semaphore,
+    fence: vk::Fence,
+    command_buffer: vk::CommandBuffer,
+    uniform_buffer_allocation: Allocation,
+    uniform_buffer: buffer::Buffer,
+    descriptor_set: vk::DescriptorSet,
+}
 
 struct Application {
     desired_extent: vk::Extent2D,
@@ -920,6 +933,7 @@ fn result_msgbox<T, E: Debug>(result: Result<T, E>) -> Result<T, E> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    material::compile_shader(Path::new("../glsl/geometry"));
     let mut app = result_msgbox(Application::new(
         vk::Extent2D {
             width: 1280,

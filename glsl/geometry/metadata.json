@@ -1,0 +1,14 @@
+{
+  "vs": {
+    "path": "./geometry.vert.glsl",
+    "vertex_layout_info": {
+      "input_binding_description": {
+        "binding": 0,
+        "stride": 0,
+        "input_rate": "Vertex"
+      },
+      "input_attribute_descriptions": []
+    }
+  },
+  "fs_path": "./geometry.frag.glsl"
+}
