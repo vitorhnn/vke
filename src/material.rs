@@ -17,13 +17,13 @@ use std::ptr;
 use sdl2::sys::wchar_t;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-enum VertexInputRate {
+pub enum VertexInputRate {
     Vertex,
     Instance,
 }
 
 impl VertexInputRate {
-    fn into_vk(self) -> vk::VertexInputRate {
+    fn as_vk(&self) -> vk::VertexInputRate {
         match self {
             VertexInputRate::Vertex => vk::VertexInputRate::VERTEX,
             VertexInputRate::Instance => vk::VertexInputRate::INSTANCE,
@@ -32,21 +32,31 @@ impl VertexInputRate {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct VertexInputBindingDescription {
-    binding: u32,
-    stride: u32,
-    input_rate: VertexInputRate,
+pub struct VertexInputBindingDescription {
+    pub binding: u32,
+    pub stride: u32,
+    pub input_rate: VertexInputRate,
+}
+
+impl VertexInputBindingDescription {
+    pub(crate) fn as_vk(&self) -> vk::VertexInputBindingDescription {
+        vk::VertexInputBindingDescription {
+            binding: self.binding,
+            stride: self.stride,
+            input_rate: self.input_rate.as_vk(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-enum Format {
+pub enum Format {
     R32G32Sfloat,
     R32G32B32Sfloat,
     R32G32B32A32Sfloat,
 }
 
 impl Format {
-    fn into_vk(self) -> vk::Format {
+    fn as_vk(&self) -> vk::Format {
         match self {
             Format::R32G32Sfloat => vk::Format::R32G32_SFLOAT,
             Format::R32G32B32Sfloat => vk::Format::R32G32B32_SFLOAT,
@@ -56,32 +66,32 @@ impl Format {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct VertexInputAttributeDescription {
-    location: u32,
-    binding: u32,
-    format: Format,
-    offset: u32,
+pub struct VertexInputAttributeDescription {
+    pub location: u32,
+    pub binding: u32,
+    pub format: Format,
+    pub offset: u32,
 }
 
 impl VertexInputAttributeDescription {
-    fn into_vk(self) -> vk::VertexInputAttributeDescription {
+    pub fn as_vk(&self) -> vk::VertexInputAttributeDescription {
         vk::VertexInputAttributeDescription {
             location: self.location,
             binding: self.binding,
-            format: self.format.into_vk(),
+            format: self.format.as_vk(),
             offset: self.offset,
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct VertexLayoutInfo {
-    input_binding_description: VertexInputBindingDescription,
-    input_attribute_descriptions: Vec<VertexInputAttributeDescription>,
+pub struct VertexLayoutInfo {
+    pub input_binding_description: VertexInputBindingDescription,
+    pub input_attribute_descriptions: Vec<VertexInputAttributeDescription>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-enum DescriptorType {
+pub enum DescriptorType {
     UniformBuffer,
     Sampler,
     SampledImage,
@@ -101,7 +111,7 @@ impl DescriptorType {
 
 bitflags! {
     #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-    struct ShaderStageFlags: u32 {
+    pub struct ShaderStageFlags: u32 {
         const Vertex = 0b1;
         const Fragment = 0b10;
         const Compute = 0b100;
@@ -140,10 +150,10 @@ impl ShaderStageFlags {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct DescriptorSetLayoutBinding {
-    binding: u32,
-    descriptor_type: DescriptorType,
-    stage_flags: ShaderStageFlags,
+pub struct DescriptorSetLayoutBinding {
+    pub binding: u32,
+    pub descriptor_type: DescriptorType,
+    pub stage_flags: ShaderStageFlags,
 }
 
 impl DescriptorSetLayoutBinding {
@@ -159,9 +169,15 @@ impl DescriptorSetLayoutBinding {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct DescriptorSetLayout {
+pub struct DescriptorSetLayout {
     // might need to increase this in the future
-    bindings: HashMap<u32, DescriptorSetLayoutBinding>,
+    pub bindings: HashMap<u32, DescriptorSetLayoutBinding>,
+}
+
+impl DescriptorSetLayout {
+    pub fn into_vk(self) -> Vec<vk::DescriptorSetLayoutBinding> {
+        self.bindings.into_iter().map(|(_, binding)| binding.into_vk()).collect()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

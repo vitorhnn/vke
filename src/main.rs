@@ -933,7 +933,6 @@ fn result_msgbox<T, E: Debug>(result: Result<T, E>) -> Result<T, E> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    material::compile_shader(Path::new("../glsl/geometry"));
     let mut app = result_msgbox(Application::new(
         vk::Extent2D {
             width: 1280,

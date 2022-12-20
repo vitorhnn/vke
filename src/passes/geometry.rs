@@ -1,13 +1,13 @@
-use std::error::Error;
 use crate::allocator::{Allocator, MemoryUsage};
 use crate::material::Technique;
 use crate::per_frame::PerFrame;
 use crate::texture::Texture;
-use crate::{buffer, material, Device};
+use crate::{buffer, material, Device, SHADER_MAIN_FN_NAME};
 use ash::vk;
 use glam::Mat4;
 use gpu_allocator::vulkan::Allocation;
 use sdl2::sys::wchar_t;
+use std::error::Error;
 use std::path::Path;
 use std::rc::Rc;
 
@@ -40,17 +40,106 @@ struct PerFrameDataUbo {
     projection: Mat4,
 }
 
-fn create_graphics_pipeline(device: &Device, technique: &Technique) -> Result<(vk::PipelineLayout, vk::Pipeline), Box<dyn Error>> {
+fn create_graphics_pipeline(
+    device: &Device,
+    technique: &Technique,
+    render_resolution: vk::Extent2D,
+) -> Result<(vk::PipelineLayout, vk::Pipeline), Box<dyn Error>> {
     let vs_module = unsafe {
         let info = vk::ShaderModuleCreateInfo::builder().code(&technique.vs_spv);
         device.inner.create_shader_module(&info, None)?
     };
+
+    let vs_stage_info = vk::PipelineShaderStageCreateInfo::builder()
+        .stage(vk::ShaderStageFlags::VERTEX)
+        .module(vs_module)
+        .name(SHADER_MAIN_FN_NAME)
+        .build();
 
     let fs_module = unsafe {
         let info = vk::ShaderModuleCreateInfo::builder().code(&technique.fs_spv);
         device.inner.create_shader_module(&info, None)?
     };
 
+    let fs_stage_info = vk::PipelineShaderStageCreateInfo::builder()
+        .stage(vk::ShaderStageFlags::FRAGMENT)
+        .module(fs_module)
+        .name(SHADER_MAIN_FN_NAME)
+        .build();
+
+    let stages = [vs_stage_info, fs_stage_info];
+
+    let binding_descriptor = technique
+        .vertex_layout_info
+        .input_binding_description
+        .as_vk();
+    let attribute_descriptors: Vec<_> = technique
+        .vertex_layout_info
+        .input_attribute_descriptions
+        .iter()
+        .map(|d| d.as_vk())
+        .collect();
+
+    let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::builder()
+        .vertex_binding_descriptions(std::slice::from_ref(&binding_descriptor))
+        .vertex_attribute_descriptions(&attribute_descriptors);
+
+    let input_assembly_info = vk::PipelineInputAssemblyStateCreateInfo::builder()
+        .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+        .primitive_restart_enable(false);
+
+    let viewports = [vk::Viewport {
+        x: 0.0,
+        y: 0.0,
+        width: render_resolution.width as f32,
+        height: render_resolution.height as f32,
+        min_depth: 0.0,
+        max_depth: 1.0,
+    }];
+
+    let scissors = [vk::Rect2D {
+        offset: vk::Offset2D { x: 0, y: 0 },
+        extent: render_resolution,
+    }];
+
+    let viewport_state = vk::PipelineViewportStateCreateInfo::builder()
+        .viewports(&viewports)
+        .scissors(&scissors);
+
+    let rasterizer_state = vk::PipelineRasterizationStateCreateInfo::builder()
+        .depth_clamp_enable(false)
+        .rasterizer_discard_enable(false)
+        .polygon_mode(vk::PolygonMode::FILL)
+        .line_width(1.0)
+        .cull_mode(vk::CullModeFlags::BACK)
+        .front_face(vk::FrontFace::CLOCKWISE)
+        .depth_bias_enable(false);
+
+    let multisampler_state = vk::PipelineMultisampleStateCreateInfo::builder()
+        .sample_shading_enable(false)
+        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+
+    let color_blend_attachment_states = [vk::PipelineColorBlendAttachmentState::builder()
+        .color_write_mask(vk::ColorComponentFlags::RGBA)
+        .blend_enable(true)
+        .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+        .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+        .color_blend_op(vk::BlendOp::ADD)
+        .src_alpha_blend_factor(vk::BlendFactor::ONE)
+        .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
+        .alpha_blend_op(vk::BlendOp::ADD)
+        .build()];
+
+    let color_blend_state = vk::PipelineColorBlendStateCreateInfo::builder()
+        .logic_op_enable(false)
+        .attachments(&color_blend_attachment_states);
+
+    /*let descriptor_set_layouts = technique
+        .descriptor_set_layouts
+        .iter()
+        .filter_map(|x| x.map(|layout| layout.into_vk()))
+        .collect::<Vec<_>>();
+     */
 
     todo!();
 }
@@ -147,6 +236,7 @@ impl GeometryPass {
             per_frame_uniform_buffer,
             ubo_allocation,
             color_targets,
+            depth_targets,
         }
     }
 }
