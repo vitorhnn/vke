@@ -1,7 +1,9 @@
+use crate::device::Device;
 use ash::vk;
 use bitflags::bitflags;
 use glam::{Vec2, Vec3, Vec4};
 use sdl2::libc::wait;
+use sdl2::sys::wchar_t;
 use serde::{Deserialize, Serialize};
 use shaderc;
 use shaderc::{ResolvedInclude, ShaderKind};
@@ -10,11 +12,10 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
-use std::fs::File;
+use std::fs::{metadata, File};
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::ptr;
-use sdl2::sys::wchar_t;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum VertexInputRate {
@@ -122,7 +123,7 @@ bitflags! {
 }
 
 impl ShaderStageFlags {
-    fn into_vk(self) -> vk::ShaderStageFlags {
+    pub fn as_vk(&self) -> vk::ShaderStageFlags {
         let mut output_flags = vk::ShaderStageFlags::empty();
 
         if self.contains(Self::Vertex) {
@@ -157,12 +158,12 @@ pub struct DescriptorSetLayoutBinding {
 }
 
 impl DescriptorSetLayoutBinding {
-    fn into_vk(self) -> vk::DescriptorSetLayoutBinding {
+    fn as_vk(&self) -> vk::DescriptorSetLayoutBinding {
         vk::DescriptorSetLayoutBinding {
             binding: self.binding,
             descriptor_type: self.descriptor_type.into_vk(),
-            descriptor_count: 0,
-            stage_flags: self.stage_flags.into_vk(),
+            descriptor_count: 1,
+            stage_flags: self.stage_flags.as_vk(),
             p_immutable_samplers: ptr::null(),
         }
     }
@@ -172,11 +173,49 @@ impl DescriptorSetLayoutBinding {
 pub struct DescriptorSetLayout {
     // might need to increase this in the future
     pub bindings: HashMap<u32, DescriptorSetLayoutBinding>,
+    is_update_after_bind: bool,
 }
 
 impl DescriptorSetLayout {
-    pub fn into_vk(self) -> Vec<vk::DescriptorSetLayoutBinding> {
-        self.bindings.into_iter().map(|(_, binding)| binding.into_vk()).collect()
+    pub fn as_vk(&self, device: &Device) -> vk::DescriptorSetLayout {
+        let bindings: Vec<_> = self
+            .bindings
+            .iter()
+            .map(|(_, binding)| binding.as_vk())
+            .collect();
+
+        let flags = if self.is_update_after_bind {
+            vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL
+        } else {
+            vk::DescriptorSetLayoutCreateFlags::empty()
+        };
+
+        let create_info = vk::DescriptorSetLayoutCreateInfo::builder()
+            .flags(flags)
+            .bindings(&bindings);
+
+        unsafe {
+            device
+                .inner
+                .create_descriptor_set_layout(&create_info, None)
+                .expect("failed to create descriptor set layouts")
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PushConstantRange {
+    size: u32,
+    pub stage_flags: ShaderStageFlags,
+}
+
+impl PushConstantRange {
+    pub fn as_vk(&self) -> vk::PushConstantRange {
+        vk::PushConstantRange {
+            offset: 0,
+            size: self.size,
+            stage_flags: self.stage_flags.as_vk(),
+        }
     }
 }
 
@@ -186,6 +225,7 @@ pub struct Technique {
     pub vs_spv: Vec<u32>,
     pub fs_spv: Vec<u32>,
     pub descriptor_set_layouts: [Option<DescriptorSetLayout>; 4],
+    pub push_constant_range: Option<PushConstantRange>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -195,15 +235,22 @@ struct VertexShaderMetadata {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct DescriptorSetMetadata {
+    is_update_after_bind: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct TechniqueMetadata {
     vs: Option<VertexShaderMetadata>,
     fs_path: String,
+    descriptor_sets: HashMap<u32, DescriptorSetMetadata>,
 }
 
 type Ast = spirv_cross::spirv::Ast<spirv_cross::glsl::Target>;
 
 fn build_descriptor_set_layouts_for_descriptor_type(
     sets: &mut [Option<DescriptorSetLayout>; 4],
+    sets_metadata: &HashMap<u32, DescriptorSetMetadata>,
     stage: ShaderStageFlags,
     ast: &Ast,
     resources: &[Resource],
@@ -213,10 +260,15 @@ fn build_descriptor_set_layouts_for_descriptor_type(
         let set_index = ast
             .get_decoration(resource.id, Decoration::DescriptorSet)
             .unwrap();
-        let binding_index = ast.get_decoration(resource.id, Decoration::Binding).unwrap();
+        let binding_index = ast
+            .get_decoration(resource.id, Decoration::Binding)
+            .unwrap();
 
         let set = &mut sets[set_index as usize].get_or_insert_with(|| DescriptorSetLayout {
             bindings: HashMap::new(),
+            is_update_after_bind: sets_metadata
+                .get(&set_index)
+                .map_or(false, |metadata| metadata.is_update_after_bind),
         });
 
         match set.bindings.entry(binding_index) {
@@ -245,12 +297,14 @@ fn build_descriptor_set_layouts_for_descriptor_type(
 
 fn build_descriptor_set_layouts_for_stage(
     sets: &mut [Option<DescriptorSetLayout>; 4],
+    sets_metadata: &HashMap<u32, DescriptorSetMetadata>,
     stage: ShaderStageFlags,
     ast: &Ast,
     resources: &ShaderResources,
 ) {
     build_descriptor_set_layouts_for_descriptor_type(
         sets,
+        sets_metadata,
         stage,
         ast,
         &resources.uniform_buffers,
@@ -258,6 +312,7 @@ fn build_descriptor_set_layouts_for_stage(
     );
     build_descriptor_set_layouts_for_descriptor_type(
         sets,
+        sets_metadata,
         stage,
         ast,
         &resources.separate_samplers,
@@ -265,11 +320,31 @@ fn build_descriptor_set_layouts_for_stage(
     );
     build_descriptor_set_layouts_for_descriptor_type(
         sets,
+        sets_metadata,
         stage,
         ast,
         &resources.separate_images,
         DescriptorType::SampledImage,
     );
+}
+
+fn parse_push_constant_for_stage(
+    stage: ShaderStageFlags,
+    ast: &Ast,
+    resources: &ShaderResources,
+) -> Option<PushConstantRange> {
+    assert!(resources.push_constant_buffers.len() < 2);
+
+    resources.push_constant_buffers.get(0).map(|res| {
+        let size = ast
+            .get_declared_struct_size(res.base_type_id)
+            .expect("failed to get push constant size");
+
+        PushConstantRange {
+            size,
+            stage_flags: stage,
+        }
+    })
 }
 
 pub fn compile_shader(dir: &Path) -> Technique {
@@ -283,6 +358,7 @@ pub fn compile_shader(dir: &Path) -> Technique {
     let metadata: TechniqueMetadata = serde_json::from_reader(metadata_reader).unwrap();
 
     let mut sets: [Option<DescriptorSetLayout>; 4] = Default::default();
+    let mut push_constant_range = None;
     let compiler = shaderc::Compiler::new().unwrap();
     let mut compile_options = shaderc::CompileOptions::new().unwrap();
     compile_options.set_include_callback(|file_name, _, _, _| {
@@ -316,10 +392,15 @@ pub fn compile_shader(dir: &Path) -> Technique {
         // build descriptor set layouts
         build_descriptor_set_layouts_for_stage(
             &mut sets,
+            &metadata.descriptor_sets,
             ShaderStageFlags::Vertex,
             &ast,
             &resources,
         );
+
+        // TODO: refactor. we will have mesh shaders instead of vs in the future
+        push_constant_range =
+            parse_push_constant_for_stage(ShaderStageFlags::Vertex, &ast, &resources);
 
         compiled_vs
     };
@@ -345,15 +426,32 @@ pub fn compile_shader(dir: &Path) -> Technique {
         // build descriptor set layouts
         build_descriptor_set_layouts_for_stage(
             &mut sets,
+            &metadata.descriptor_sets,
             ShaderStageFlags::Fragment,
             &ast,
             &resources,
         );
 
+        let fs_push_constants =
+            parse_push_constant_for_stage(ShaderStageFlags::Fragment, &ast, &resources);
+
+        if let Some(fs_push_constants) = fs_push_constants {
+            if let Some(push_constant_range) = push_constant_range.as_mut() {
+                if fs_push_constants.size != push_constant_range.size {
+                    panic!("push constant size mismatch between stages");
+                }
+
+                push_constant_range.stage_flags |= ShaderStageFlags::Fragment;
+            } else {
+                push_constant_range = Some(fs_push_constants);
+            }
+        }
+
         compiled_fs
     };
 
     Technique {
+        push_constant_range,
         fs_spv: compiled_fs.as_binary().to_vec(),
         vs_spv: compiled_vs.as_binary().to_vec(),
         vertex_layout_info: metadata.vs.unwrap().vertex_layout_info,

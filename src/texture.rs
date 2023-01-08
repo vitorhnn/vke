@@ -11,6 +11,7 @@ pub struct TextureInfo {
     pub format: vk::Format,
 }
 
+#[derive(Debug)]
 pub struct Texture {
     pub image: vk::Image,
     device: Rc<Device>,

@@ -4,6 +4,7 @@ use ash::vk;
 use ash::vk::ImageViewCreateInfo;
 use std::rc::Rc;
 
+#[derive(Debug)]
 pub struct TextureView {
     pub inner: vk::ImageView,
     pub texture: Texture,

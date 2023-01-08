@@ -750,6 +750,7 @@ version = "0.1.0"
 dependencies = [
  "ash",
  "bitflags 2.0.0-rc.1",
+ "bytemuck",
  "glam",
  "gltf",
  "gpu-allocator",

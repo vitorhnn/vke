@@ -7,8 +7,8 @@ layout(location = 2) in vec3 normal;
 
 layout(location = 0) out vec4 outColor;
 
-layout(set = 0, binding = 1) uniform sampler stdSampler;
-layout(set = 0, binding = 2) uniform texture2D albedo;
+//layout(set = 2, binding = 1) uniform sampler stdSampler;
+//layout(set = 1, binding = 2) uniform texture2D albedo;
 
 const vec3 lightPos = vec3(1.2, 1.0, 2.0);
 const vec3 color = vec3(1.0, 0.0, 0.0);

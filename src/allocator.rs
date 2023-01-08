@@ -5,6 +5,7 @@ use parking_lot::Mutex;
 use gpu_allocator::MemoryLocation;
 use std::ffi::c_void;
 use std::rc::Rc;
+use std::sync::Once;
 
 use crate::buffer::Buffer;
 use crate::device::{Device, RawDevice};
@@ -49,6 +50,8 @@ fn to_gpu_allocator(usage: MemoryUsage) -> MemoryLocation {
         MemoryUsage::HostOnly => MemoryLocation::CpuToGpu,
     }
 }
+
+static UNMAP_WARNING: Once = Once::new();
 
 impl Allocator {
     pub fn new(device: Rc<Device>, instance: &Instance) -> Self {
@@ -152,7 +155,9 @@ impl Allocator {
     }
 
     pub fn unmap(&self, _allocation: &Allocation) {
-        eprintln!("unmap does nothing currently");
+        UNMAP_WARNING.call_once(|| {
+            eprintln!("unmap does nothing currently");
+        });
     }
 
     pub fn free(&self, allocation: Allocation) {

@@ -1,4 +1,5 @@
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
+use std::fmt::{Debug, Formatter};
 use std::ops::Deref;
 use std::rc::Rc;
 
@@ -18,6 +19,7 @@ use crate::queue::Queue;
 // Used to break cycles, mostly
 pub struct RawDevice {
     pub inner: VkDevice,
+    pub name: CString,
 }
 
 impl Deref for RawDevice {
@@ -32,6 +34,21 @@ impl Drop for RawDevice {
     fn drop(&mut self) {
         eprintln!("drop device");
         unsafe { self.inner.destroy_device(None) };
+    }
+}
+
+impl Debug for Device {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Device")
+            .field(
+                "graphics queue family index",
+                &self.graphics_queue.family_index,
+            )
+            .field(
+                "transfer queue family index",
+                &self.transfer_queue.family_index,
+            )
+            .finish()
     }
 }
 
@@ -52,6 +69,7 @@ pub struct Device {
 /// we're going to use for operations. We prefer dedicated queue families but fallback to the same queue family if needed
 struct SelectedDeviceInfo {
     device: vk::PhysicalDevice,
+    name: CString,
     // we make the (currently) reasonable assumption that we can present from the graphics queue
     graphics_family: u32,
     transfer_family: u32,
@@ -120,6 +138,7 @@ impl Device {
                     .inner
                     .create_device(physical_device, &create_device_info_builder, None)?
             },
+            name: selected_device_info.name,
         });
 
         let raw_graphics_queue =
@@ -254,6 +273,7 @@ impl Device {
                     device,
                     graphics_family,
                     transfer_family,
+                    name: device_name.into(),
                 })
             });
 
