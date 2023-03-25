@@ -563,11 +563,12 @@ impl GeometryPass {
                     self.device
                         .inner
                         .cmd_draw_indexed(*command_buffer, mesh.idx_count, 1, 0, 0, 0);
-
                 }
             }
 
-            self.device.inner.cmd_end_rendering(*command_buffer);
+            self.device
+                .dynamic_rendering
+                .cmd_end_rendering(*command_buffer);
         };
 
         Ok(())
