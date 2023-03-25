@@ -1,12 +1,12 @@
 use crate::allocator::{Allocator, MemoryUsage};
 use crate::device::ImageBarrierParameters;
 use crate::loader::World;
-use crate::material::{DescriptorSetLayout, Technique};
+use crate::technique::{DescriptorSetLayout, Technique};
 use crate::per_frame::PerFrame;
 use crate::texture::Texture;
 use crate::texture_view::TextureView;
 use crate::PerFrameDataUbo;
-use crate::{buffer, material, Device, FRAMES_IN_FLIGHT, SHADER_MAIN_FN_NAME};
+use crate::{buffer, technique, Device, FRAMES_IN_FLIGHT, SHADER_MAIN_FN_NAME};
 use ash::prelude::VkResult;
 use ash::vk;
 use glam::{Mat4, Vec3};
@@ -327,7 +327,7 @@ impl GeometryPass {
                 .expect("failed to create view for depth targets")
         });
 
-        let technique = material::compile_shader(Path::new("./glsl/geometry"));
+        let technique = technique::compile_shader(Path::new("./glsl/geometry"));
 
         let (pipeline_layout, pipeline, descriptor_set_layouts) =
             create_graphics_pipeline(&device, &technique, render_resolution)

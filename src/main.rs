@@ -39,7 +39,7 @@ mod asset;
 mod fly_camera;
 mod input;
 mod loader;
-mod material;
+mod technique;
 mod passes;
 mod per_frame;
 mod sampler;
@@ -564,7 +564,7 @@ fn result_msgbox<T, E: Debug>(result: Result<T, E>) -> Result<T, E> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    material::compile_shader(Path::new("./glsl/geometry/"));
+    technique::compile_shader(Path::new("./glsl/geometry/"));
     let mut app = result_msgbox(Application::new(
         vk::Extent2D {
             width: 1280,
