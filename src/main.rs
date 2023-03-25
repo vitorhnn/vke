@@ -180,30 +180,6 @@ impl Application {
             })
             .collect::<Result<_, _>>()?;
 
-        const DESCRIPTOR_POOL_SIZE: u32 = 128;
-
-        let pool_sizes = [
-            vk::DescriptorPoolSize {
-                descriptor_count: DESCRIPTOR_POOL_SIZE,
-                ty: vk::DescriptorType::UNIFORM_BUFFER,
-            },
-            vk::DescriptorPoolSize {
-                descriptor_count: DESCRIPTOR_POOL_SIZE,
-                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            },
-        ];
-
-        let pool_create_info = vk::DescriptorPoolCreateInfo::builder()
-            .pool_sizes(&pool_sizes)
-            .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET)
-            .max_sets(DESCRIPTOR_POOL_SIZE);
-
-        let descriptor_pool = unsafe {
-            device
-                .inner
-                .create_descriptor_pool(&pool_create_info, None)?
-        };
-
         let scene = asset::Scene::from_gltf(Path::new("./Sponza.glb"))?;
         let world = loader::load_scene(allocator.clone(), &mut transfer, scene);
 
