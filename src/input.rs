@@ -13,6 +13,7 @@ pub struct InputState {
     pub should_quit: bool,
     pub maximize: bool,
     pub mouse_delta: Vec2,
+    pub flip_relative_mouse: bool,
 }
 
 impl InputState {
@@ -27,6 +28,7 @@ impl InputState {
             should_quit: false,
             maximize: false,
             mouse_delta: Vec2::new(0.0, 0.0),
+            flip_relative_mouse: false,
         }
     }
 
@@ -43,6 +45,7 @@ impl InputState {
                             Keycode::A => self.left = true,
                             Keycode::E => self.up = true,
                             Keycode::Q => self.down = true,
+                            Keycode::F11 => self.flip_relative_mouse = true,
                             _ => (),
                         }
                     }

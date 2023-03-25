@@ -80,6 +80,7 @@ struct Application {
     instance: Instance,
     input_state: input::InputState,
     fly_camera: fly_camera::FlyCamera,
+    relative_mouse: bool,
 }
 
 #[repr(C)]
@@ -106,7 +107,7 @@ impl Application {
             .vulkan()
             .build()?;
 
-        sdl_ctx.mouse().set_relative_mouse_mode(true);
+        sdl_ctx.mouse().set_relative_mouse_mode(false);
 
         let instance = Instance::new(&window)?;
 
@@ -237,6 +238,7 @@ impl Application {
             input_state: input::InputState::new(),
             fly_camera: fly_camera::FlyCamera::new(),
             geometry_pass,
+            relative_mouse: false,
         };
 
         Ok(app)
@@ -253,8 +255,18 @@ impl Application {
             }
 
             if self.input_state.maximize {
-                self.window.set_fullscreen(FullscreenType::True);
+                self.window
+                    .set_fullscreen(FullscreenType::True)
+                    .expect("failed to transition to fullscreen");
                 self.input_state.maximize = false;
+            }
+
+            if self.input_state.flip_relative_mouse {
+                self.relative_mouse = !self.relative_mouse;
+                self.sdl_ctx
+                    .mouse()
+                    .set_relative_mouse_mode(self.relative_mouse);
+                self.input_state.flip_relative_mouse = false;
             }
 
             self.fly_camera.update(&mut self.input_state);
