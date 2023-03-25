@@ -8,9 +8,12 @@ pub struct InputState {
     pub backward: bool,
     pub left: bool,
     pub right: bool,
+    pub up: bool,
+    pub down: bool,
     pub should_quit: bool,
     pub maximize: bool,
     pub mouse_delta: Vec2,
+    pub flip_relative_mouse: bool,
 }
 
 impl InputState {
@@ -20,9 +23,12 @@ impl InputState {
             backward: false,
             left: false,
             right: false,
+            up: false,
+            down: false,
             should_quit: false,
             maximize: false,
             mouse_delta: Vec2::new(0.0, 0.0),
+            flip_relative_mouse: false,
         }
     }
 
@@ -37,6 +43,9 @@ impl InputState {
                             Keycode::S => self.backward = true,
                             Keycode::D => self.right = true,
                             Keycode::A => self.left = true,
+                            Keycode::E => self.up = true,
+                            Keycode::Q => self.down = true,
+                            Keycode::F11 => self.flip_relative_mouse = true,
                             _ => (),
                         }
                     }
@@ -48,6 +57,8 @@ impl InputState {
                             Keycode::S => self.backward = false,
                             Keycode::D => self.right = false,
                             Keycode::A => self.left = false,
+                            Keycode::E => self.up = false,
+                            Keycode::Q => self.down = false,
                             _ => (),
                         }
                     }

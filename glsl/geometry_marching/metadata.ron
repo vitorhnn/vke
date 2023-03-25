@@ -1,0 +1,34 @@
+TechniqueMetadata(
+    type: Graphics(GraphicsTechnique(
+        vs: Some(VertexShaderMetadata(
+            path: "./geometry.vert.glsl",
+            vertex_layout_info: VertexLayoutInfo(
+                input_binding_description: VertexInputBindingDescription(
+                    binding: 0,
+                    stride: 32,
+                    input_rate: Vertex,
+                ),
+                input_attribute_descriptions: [
+                    VertexInputAttributeDescription(
+                        location: 0,
+                        binding: 0,
+                        format: R32G32B32A32Sfloat,
+                        offset: 0,
+                    ),
+                    VertexInputAttributeDescription(
+                        location: 2,
+                        binding: 0,
+                        format: R32G32B32A32Sfloat,
+                        offset: 16,
+                    ),
+                ],
+            ),
+        )),
+        fs_path: "./geometry.frag.glsl",
+    )),
+    descriptor_sets: {
+        0: DescriptorSetMetadata(
+            is_update_after_bind: false,
+        ),
+    },
+)

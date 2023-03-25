@@ -26,7 +26,7 @@ impl Instance {
             .application_version(vk::make_api_version(0, 0, 1, 0))
             .engine_name(APPLICATION_NAME)
             .engine_version(vk::make_api_version(0, 0, 1, 0))
-            .api_version(vk::make_api_version(0, 1, 1, 0));
+            .api_version(vk::make_api_version(0, 1, 3, 0));
 
         let layers: SmallVec<[*const c_char; 1]> =
             if Instance::are_validation_layers_supported(&entry)?

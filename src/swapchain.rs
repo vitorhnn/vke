@@ -82,7 +82,7 @@ impl Swapchain {
             .image_color_space(vk::ColorSpaceKHR::SRGB_NONLINEAR)
             .image_format(vk::Format::B8G8R8A8_SRGB)
             .image_extent(extent)
-            .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+            .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST)
             .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
             .pre_transform(support_info.capabilities.current_transform)
             .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)

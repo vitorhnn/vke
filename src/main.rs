@@ -2,24 +2,19 @@
 #![feature(try_find)]
 #![feature(maybe_uninit_uninit_array)]
 #![feature(maybe_uninit_array_assume_init)]
+#![feature(array_zip)]
 
 use ash::{prelude::VkResult, vk};
-use std::borrow::BorrowMut;
-
-use sdl2::event::Event;
+use passes::marching_cubes_compute::MarchingCubesComputePass;
 
 use std::error::Error;
 use std::ffi::CStr;
 use std::fmt::Debug;
-use std::fs::File;
 use std::path::Path;
 use std::rc::Rc;
 
-use memoffset::offset_of;
+use glam::Mat4;
 
-use glam::{Mat4, Vec3};
-
-use gpu_allocator::vulkan::{Allocation, Allocator};
 use sdl2::video::FullscreenType;
 
 mod buffer;
@@ -39,7 +34,7 @@ mod asset;
 mod fly_camera;
 mod input;
 mod loader;
-mod material;
+mod technique;
 mod passes;
 mod per_frame;
 mod sampler;
@@ -48,10 +43,10 @@ mod texture_view;
 mod transfer;
 
 use crate::device::ImageBarrierParameters;
-use crate::loader::{load_png, World};
+use crate::loader::World;
 use crate::passes::geometry::GeometryPass;
 use crate::texture::Texture;
-use crate::texture_view::TextureView;
+
 use transfer::Transfer;
 
 struct FrameResources {
@@ -72,6 +67,7 @@ struct Application {
     device: Rc<Device>,
     surface: surface::Surface,
     geometry_pass: GeometryPass,
+    marching_cubes_compute_pass: MarchingCubesComputePass,
     transfer: Transfer,
     frame_resources: Vec<FrameResources>,
     current_frame: usize,
@@ -80,6 +76,7 @@ struct Application {
     instance: Instance,
     input_state: input::InputState,
     fly_camera: fly_camera::FlyCamera,
+    relative_mouse: bool,
 }
 
 #[repr(C)]
@@ -106,7 +103,7 @@ impl Application {
             .vulkan()
             .build()?;
 
-        sdl_ctx.mouse().set_relative_mouse_mode(true);
+        sdl_ctx.mouse().set_relative_mouse_mode(false);
 
         let instance = Instance::new(&window)?;
 
@@ -138,7 +135,7 @@ impl Application {
             desired_present_mode,
         )?;
 
-        let mut frame_resources: Vec<FrameResources> = (0..FRAMES_IN_FLIGHT)
+        let frame_resources: Vec<FrameResources> = (0..FRAMES_IN_FLIGHT)
             .map::<VkResult<FrameResources>, _>(|_| {
                 let semaphore_create_info = vk::SemaphoreCreateInfo::builder();
 
@@ -179,34 +176,12 @@ impl Application {
             })
             .collect::<Result<_, _>>()?;
 
-        const DESCRIPTOR_POOL_SIZE: u32 = 128;
-
-        let pool_sizes = [
-            vk::DescriptorPoolSize {
-                descriptor_count: DESCRIPTOR_POOL_SIZE,
-                ty: vk::DescriptorType::UNIFORM_BUFFER,
-            },
-            vk::DescriptorPoolSize {
-                descriptor_count: DESCRIPTOR_POOL_SIZE,
-                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            },
-        ];
-
-        let pool_create_info = vk::DescriptorPoolCreateInfo::builder()
-            .pool_sizes(&pool_sizes)
-            .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET)
-            .max_sets(DESCRIPTOR_POOL_SIZE);
-
-        let descriptor_pool = unsafe {
-            device
-                .inner
-                .create_descriptor_pool(&pool_create_info, None)?
-        };
-
-        let scene = asset::Scene::from_gltf(Path::new("./Sponza.glb"))?;
+        let scene = asset::Scene::from_gltf(Path::new("./cube.glb"))?;
+        //let scene = asset::Scene::from_gltf(Path::new("./suzanne/Suzanne.gltf"))?;
         let world = loader::load_scene(allocator.clone(), &mut transfer, scene);
 
         let geometry_pass = GeometryPass::new(device.clone(), allocator.clone(), desired_extent);
+        let marching_cubes_compute_pass = MarchingCubesComputePass::new(device.clone(), allocator.clone());
 
         println!("VKe: application created");
         println!(
@@ -237,6 +212,8 @@ impl Application {
             input_state: input::InputState::new(),
             fly_camera: fly_camera::FlyCamera::new(),
             geometry_pass,
+            marching_cubes_compute_pass,
+            relative_mouse: false,
         };
 
         Ok(app)
@@ -253,8 +230,14 @@ impl Application {
             }
 
             if self.input_state.maximize {
-                self.window.set_fullscreen(FullscreenType::True);
+                self.window.set_fullscreen(FullscreenType::True).expect("failed to doobly doo");
                 self.input_state.maximize = false;
+            }
+            
+            if self.input_state.flip_relative_mouse {
+                self.relative_mouse = !self.relative_mouse;
+                self.sdl_ctx.mouse().set_relative_mouse_mode(self.relative_mouse);
+                self.input_state.flip_relative_mouse = false;
             }
 
             self.fly_camera.update(&mut self.input_state);
@@ -338,8 +321,10 @@ impl Application {
         let frame_ubo = self.update_ubo();
 
         unsafe {
+            let (output_ssbo, count_ssbo) = self.marching_cubes_compute_pass.execute(self.current_frame, &command_buffer)?;
+
             self.geometry_pass
-                .execute(self.current_frame, &command_buffer, &self.world, frame_ubo);
+                .execute(self.current_frame, &command_buffer, &self.world, frame_ubo, output_ssbo, count_ssbo)?;
 
             self.device.insert_image_barrier(&ImageBarrierParameters {
                 command_buffer,
@@ -576,13 +561,12 @@ fn result_msgbox<T, E: Debug>(result: Result<T, E>) -> Result<T, E> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    material::compile_shader(Path::new("./glsl/geometry/"));
     let mut app = result_msgbox(Application::new(
         vk::Extent2D {
-            width: 1280,
-            height: 720,
+            width: 1920,
+            height: 1080,
         },
-        vk::PresentModeKHR::IMMEDIATE,
+        vk::PresentModeKHR::FIFO,
     ))?;
 
     match result_msgbox(app.run()) {

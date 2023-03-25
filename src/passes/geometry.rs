@@ -1,18 +1,18 @@
 use crate::allocator::{Allocator, MemoryUsage};
+use crate::buffer::Buffer;
 use crate::device::ImageBarrierParameters;
 use crate::loader::World;
-use crate::material::{DescriptorSetLayout, Technique};
 use crate::per_frame::PerFrame;
-use crate::texture::Texture;
+use crate::technique::{
+    CookedGraphicsTechnique, DescriptorSetLayout, PushConstantRange, Technique, TechniqueType,
+};
 use crate::texture_view::TextureView;
 use crate::PerFrameDataUbo;
-use crate::{buffer, material, Device, FRAMES_IN_FLIGHT, SHADER_MAIN_FN_NAME};
+use crate::{buffer, technique, Device, FRAMES_IN_FLIGHT, SHADER_MAIN_FN_NAME};
 use ash::prelude::VkResult;
 use ash::vk;
-use glam::{Mat4, Vec3};
 use gpu_allocator::vulkan::Allocation;
 use std::error::Error;
-use std::mem::MaybeUninit;
 use std::path::Path;
 use std::rc::Rc;
 
@@ -33,7 +33,9 @@ pub struct GeometryPass {
 
 fn create_graphics_pipeline(
     device: &Device,
-    technique: &Technique,
+    technique: &CookedGraphicsTechnique,
+    descriptor_set_layouts: &[Option<DescriptorSetLayout>; 4],
+    push_constant_range: &Option<PushConstantRange>,
     render_resolution: vk::Extent2D,
 ) -> Result<
     (
@@ -43,8 +45,9 @@ fn create_graphics_pipeline(
     ),
     Box<dyn Error>,
 > {
+    let vs = &technique.vs_meta.as_ref().expect("hardcoded vs expect");
     let vs_module = unsafe {
-        let info = vk::ShaderModuleCreateInfo::builder().code(&technique.vs_spv);
+        let info = vk::ShaderModuleCreateInfo::builder().code(&vs.spv);
         device.inner.create_shader_module(&info, None)?
     };
 
@@ -67,11 +70,8 @@ fn create_graphics_pipeline(
 
     let stages = [vs_stage_info, fs_stage_info];
 
-    let binding_descriptor = technique
-        .vertex_layout_info
-        .input_binding_description
-        .as_vk();
-    let attribute_descriptors: Vec<_> = technique
+    let binding_descriptor = vs.vertex_layout_info.input_binding_description.as_vk();
+    let attribute_descriptors: Vec<_> = vs
         .vertex_layout_info
         .input_attribute_descriptions
         .iter()
@@ -109,7 +109,7 @@ fn create_graphics_pipeline(
         .rasterizer_discard_enable(false)
         .polygon_mode(vk::PolygonMode::FILL)
         .line_width(1.0)
-        .cull_mode(vk::CullModeFlags::BACK)
+        .cull_mode(vk::CullModeFlags::NONE)
         .front_face(vk::FrontFace::CLOCKWISE)
         .depth_bias_enable(false);
 
@@ -132,8 +132,7 @@ fn create_graphics_pipeline(
         .logic_op_enable(false)
         .attachments(&color_blend_attachment_states);
 
-    let descriptor_set_layouts = technique
-        .descriptor_set_layouts
+    let descriptor_set_layouts = descriptor_set_layouts
         .iter()
         .filter_map(|x| x.as_ref().map(|layout| layout.as_vk(&device)))
         .collect::<Vec<_>>();
@@ -141,7 +140,7 @@ fn create_graphics_pipeline(
     let pipeline_layout = unsafe {
         let mut info = vk::PipelineLayoutCreateInfo::builder().set_layouts(&descriptor_set_layouts);
 
-        let push_constant_range = technique.push_constant_range.as_ref().map(|x| x.as_vk());
+        let push_constant_range = push_constant_range.as_ref().map(|x| x.as_vk());
 
         if let Some(push_constant_range) = &push_constant_range {
             info = info.push_constant_ranges(std::slice::from_ref(push_constant_range));
@@ -327,24 +326,33 @@ impl GeometryPass {
                 .expect("failed to create view for depth targets")
         });
 
-        let technique = material::compile_shader(Path::new("./glsl/geometry"));
+        let technique = technique::compile_shader(Path::new("./glsl/geometry_marching"));
 
-        let (pipeline_layout, pipeline, descriptor_set_layouts) =
-            create_graphics_pipeline(&device, &technique, render_resolution)
-                .expect("failed to create graphics pipeline");
-        Self {
-            device,
-            allocator,
-            technique,
-            descriptor_pools,
-            per_frame_uniform_buffer,
-            ubo_allocation,
-            color_target_views,
-            depth_target_views,
-            render_resolution,
-            pipeline,
-            pipeline_layout,
-            descriptor_set_layouts,
+        if let TechniqueType::Graphics(graphics_technique) = &technique.r#type {
+            let (pipeline_layout, pipeline, descriptor_set_layouts) = create_graphics_pipeline(
+                &device,
+                &graphics_technique,
+                &technique.descriptor_set_layouts,
+                &technique.push_constant_range,
+                render_resolution,
+            )
+            .expect("failed to create graphics pipeline");
+            Self {
+                device,
+                allocator,
+                technique,
+                descriptor_pools,
+                per_frame_uniform_buffer,
+                ubo_allocation,
+                color_target_views,
+                depth_target_views,
+                render_resolution,
+                pipeline,
+                pipeline_layout,
+                descriptor_set_layouts,
+            }
+        } else {
+            panic!("not a graphics technique");
         }
     }
 
@@ -411,6 +419,8 @@ impl GeometryPass {
         command_buffer: &vk::CommandBuffer,
         world: &World,
         ubo: PerFrameDataUbo,
+        output_ssbo: &Buffer,
+        indirect_cmd_ssbo: &Buffer,
     ) -> VkResult<()> {
         let color_target = self.color_target_views.get_resource_for_frame(frame_idx);
         let depth_target = self.depth_target_views.get_resource_for_frame(frame_idx);
@@ -523,6 +533,7 @@ impl GeometryPass {
                 &[],
             );
 
+            /*
             for model in &world.models {
                 // TODO: this is *really, really* bad for CPU performance. we should batch static geometry in a single vertex buffer.
                 for mesh in &model.meshes {
@@ -543,7 +554,7 @@ impl GeometryPass {
                     );
 
                     // TODO won't be identity in the future
-                    let model = Mat4::IDENTITY;
+                    let model = model.transform;
 
                     let ptr = bytemuck::cast_slice(model.as_ref());
 
@@ -566,8 +577,41 @@ impl GeometryPass {
 
                 }
             }
+            */
 
-            self.device.inner.cmd_end_rendering(*command_buffer);
+            // marching cubes hacks
+            let offsets = [0];
+            self.device.inner.cmd_bind_vertex_buffers(
+                *command_buffer,
+                0,
+                std::slice::from_ref(&output_ssbo.inner),
+                &offsets,
+            );
+
+            let model = glam::Mat4::IDENTITY;
+
+            let ptr = bytemuck::cast_slice(model.as_ref());
+
+            self.device.inner.cmd_push_constants(
+                *command_buffer,
+                self.pipeline_layout,
+                self.technique
+                    .push_constant_range
+                    .as_ref()
+                    .unwrap()
+                    .stage_flags
+                    .as_vk(),
+                0,
+                ptr,
+            );
+
+            self.device
+                .inner
+                .cmd_draw_indirect(*command_buffer, indirect_cmd_ssbo.inner, 0, 1, 0);
+
+            self.device
+                .dynamic_rendering
+                .cmd_end_rendering(*command_buffer);
         };
 
         Ok(())

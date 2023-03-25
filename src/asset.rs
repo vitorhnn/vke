@@ -1,8 +1,9 @@
+use std::ops::Mul;
+
 use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
 use gltf::mesh::util::{ReadIndices, ReadTexCoords};
 use gltf::mesh::Mode;
 use gltf::scene::Transform;
-use gltf::Semantic;
 use snafu::prelude::*;
 
 #[derive(Debug, Snafu)]
@@ -58,7 +59,7 @@ impl Scene {
         let mut models = Vec::new();
 
         for node in default_scene.nodes() {
-            let transform = match node.transform() {
+            let mut transform = match node.transform() {
                 Transform::Matrix { matrix } => Mat4::from_cols_array_2d(&matrix),
                 Transform::Decomposed {
                     translation,
@@ -66,7 +67,7 @@ impl Scene {
                     scale,
                 } => Mat4::from_scale_rotation_translation(
                     Vec3::from(scale),
-                    Quat::from_array(rotation),
+                    Quat::from_array(rotation).normalize(),
                     Vec3::from(translation),
                 ),
             };

@@ -113,6 +113,7 @@ impl Device {
             vk::PhysicalDeviceTimelineSemaphoreFeaturesKHR::builder().timeline_semaphore(true);
         let mut dynamic_rendering_features =
             vk::PhysicalDeviceDynamicRenderingFeaturesKHR::builder().dynamic_rendering(true);
+        let mut vulkan13Features = vk::PhysicalDeviceVulkan13Features::builder().synchronization2(true).dynamic_rendering(true);
         let device_features_builder = vk::PhysicalDeviceFeatures::builder();
 
         let device_extensions = [
@@ -130,7 +131,8 @@ impl Device {
             .enabled_extension_names(&device_extensions)
             .enabled_features(&device_features_builder)
             .push_next(&mut timeline_semaphores_features)
-            .push_next(&mut dynamic_rendering_features);
+            .push_next(&mut dynamic_rendering_features)
+            .push_next(&mut vulkan13Features);
 
         let raw_device = Rc::new(RawDevice {
             inner: unsafe {

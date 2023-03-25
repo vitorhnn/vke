@@ -1,0 +1,10 @@
+TechniqueMetadata(
+    type: Compute(ComputeTechnique(
+        cs_path: "./marching.comp.glsl"
+    )),
+    descriptor_sets: {
+        0: DescriptorSetMetadata(
+            is_update_after_bind: false
+        ),
+    },
+)

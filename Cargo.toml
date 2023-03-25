@@ -10,7 +10,7 @@ edition = "2018"
 ash = "0.37.1"
 sdl2 = "0.35"
 memoffset = "0.6"
-glam = "0.20"
+glam = "0.22"
 png = "0.17"
 parking_lot = "0.12"
 smallvec = "1"
@@ -21,9 +21,11 @@ itertools = "0.10.3"
 serde = { version = "1", features = ["derive"] }
 shaderc = "0.8"
 serde_json = "1.0"
+ron = "0.8"
 spirv_cross = { version = "0.23", features = ["glsl"] }
 bitflags = { version = "2.0.0-rc.1", features = ["serde"] }
 bytemuck = "1"
+oorandom = "11.1.3"
 
 #[profile.dev]
 #opt-level=1

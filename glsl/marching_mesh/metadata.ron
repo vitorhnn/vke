@@ -1,0 +1,11 @@
+TechniqueMetadata(
+    type: Graphics(GraphicsTechnique(
+        ms_path: Some("./marching.mesh.glsl"),
+        fs_path: "./geometry.frag.glsl",
+    )),
+    descriptor_sets: {
+        0: DescriptorSetMetadata(
+            is_update_after_bind: false,
+        ),
+    },
+)
