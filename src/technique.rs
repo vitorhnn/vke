@@ -1,18 +1,14 @@
 use crate::device::Device;
 use ash::vk;
 use bitflags::bitflags;
-use glam::{Vec2, Vec3, Vec4};
-use sdl2::libc::wait;
-use sdl2::sys::wchar_t;
 use serde::{Deserialize, Serialize};
 use shaderc;
 use shaderc::{ResolvedInclude, ShaderKind};
 use spirv_cross::spirv::{Decoration, Resource, ShaderResources};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::ffi::OsStr;
 use std::fs;
-use std::fs::{metadata, File};
+use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::ptr;
@@ -220,10 +216,48 @@ impl PushConstantRange {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Technique {
+pub struct CookedVertexShaderMetadata {
+    pub spv: Vec<u32>,
     pub vertex_layout_info: VertexLayoutInfo,
-    pub vs_spv: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CookedGraphicsTechnique {
+    pub vs_meta: Option<CookedVertexShaderMetadata>,
+    pub ms_spv: Option<Vec<u32>>,
     pub fs_spv: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CookedComputeTechnique {
+    pub cs_spv: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TechniqueType {
+    Graphics(CookedGraphicsTechnique),
+    Compute(CookedComputeTechnique),
+}
+
+impl TechniqueType {
+    pub fn graphics(&self) -> Option<&CookedGraphicsTechnique> {
+        match self {
+            TechniqueType::Graphics(graphics_technique) => Some(&graphics_technique),
+            _ => None,
+        }
+    }
+
+    pub fn compute(&self) -> Option<&CookedComputeTechnique> {
+        match self {
+            TechniqueType::Compute(compute_technique) => Some(&compute_technique),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Technique {
+    pub r#type: TechniqueType,
     pub descriptor_set_layouts: [Option<DescriptorSetLayout>; 4],
     pub push_constant_range: Option<PushConstantRange>,
 }
@@ -240,9 +274,26 @@ struct DescriptorSetMetadata {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct TechniqueMetadata {
+struct ComputeTechnique {
+    cs_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum TechniqueMetadataType {
+    Graphics(GraphicsTechnique),
+    Compute(ComputeTechnique),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GraphicsTechnique {
     vs: Option<VertexShaderMetadata>,
+    ms_path: Option<String>,
     fs_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TechniqueMetadata {
+    r#type: TechniqueMetadataType,
     descriptor_sets: HashMap<u32, DescriptorSetMetadata>,
 }
 
@@ -284,7 +335,7 @@ fn build_descriptor_set_layouts_for_descriptor_type(
 
                 binding.stage_flags |= stage;
             }
-            Entry::Vacant(mut vacant_slot) => {
+            Entry::Vacant(vacant_slot) => {
                 vacant_slot.insert(DescriptorSetLayoutBinding {
                     binding: binding_index,
                     stage_flags: stage,
@@ -326,6 +377,14 @@ fn build_descriptor_set_layouts_for_stage(
         &resources.separate_images,
         DescriptorType::SampledImage,
     );
+    build_descriptor_set_layouts_for_descriptor_type(
+        sets,
+        sets_metadata,
+        stage,
+        ast,
+        &resources.storage_buffers,
+        DescriptorType::StorageBuffer,
+    );
 }
 
 fn parse_push_constant_for_stage(
@@ -353,9 +412,9 @@ pub fn compile_shader(dir: &Path) -> Technique {
         panic!("dir was not dir, we don't have proper error handling for this yet");
     }
 
-    let metadata_path: PathBuf = dir.join(Path::new("metadata.json"));
+    let metadata_path: PathBuf = dir.join(Path::new("metadata.ron"));
     let metadata_reader = BufReader::new(File::open(&metadata_path).unwrap());
-    let metadata: TechniqueMetadata = serde_json::from_reader(metadata_reader).unwrap();
+    let metadata: TechniqueMetadata = ron::de::from_reader(metadata_reader).unwrap();
 
     let mut sets: [Option<DescriptorSetLayout>; 4] = Default::default();
     let mut push_constant_range = None;
@@ -370,91 +429,185 @@ pub fn compile_shader(dir: &Path) -> Technique {
         })
     });
 
-    let compiled_vs = {
-        let vs_meta = metadata.vs.as_ref().unwrap();
-        let resolved_path: PathBuf = dir.join(Path::new(&vs_meta.path));
-        let vs_source = fs::read_to_string(&resolved_path).unwrap();
-        let compiled_vs = compiler
-            .compile_into_spirv(
-                &vs_source,
-                ShaderKind::Vertex,
-                &vs_meta.path,
-                "main",
-                Some(&compile_options),
-            )
-            .unwrap();
+    match metadata.r#type {
+        TechniqueMetadataType::Graphics(GraphicsTechnique {
+            vs,
+            ms_path,
+            fs_path,
+        }) => {
+            let compiled_vs = match vs {
+                Some(vs_meta) => {
+                    let resolved_path: PathBuf = dir.join(Path::new(&vs_meta.path));
+                    let vs_source = fs::read_to_string(&resolved_path).unwrap();
+                    let compiled_vs = compiler
+                        .compile_into_spirv(
+                            &vs_source,
+                            ShaderKind::Vertex,
+                            &vs_meta.path,
+                            "main",
+                            Some(&compile_options),
+                        )
+                        .unwrap();
 
-        let module = spirv_cross::spirv::Module::from_words(compiled_vs.as_binary());
-        let ast = Ast::parse(&module).unwrap();
+                    let module = spirv_cross::spirv::Module::from_words(compiled_vs.as_binary());
+                    let ast = Ast::parse(&module).unwrap();
 
-        let resources = ast.get_shader_resources().unwrap();
+                    let resources = ast.get_shader_resources().unwrap();
 
-        // build descriptor set layouts
-        build_descriptor_set_layouts_for_stage(
-            &mut sets,
-            &metadata.descriptor_sets,
-            ShaderStageFlags::Vertex,
-            &ast,
-            &resources,
-        );
+                    // build descriptor set layouts
+                    build_descriptor_set_layouts_for_stage(
+                        &mut sets,
+                        &metadata.descriptor_sets,
+                        ShaderStageFlags::Vertex,
+                        &ast,
+                        &resources,
+                    );
 
-        // TODO: refactor. we will have mesh shaders instead of vs in the future
-        push_constant_range =
-            parse_push_constant_for_stage(ShaderStageFlags::Vertex, &ast, &resources);
+                    push_constant_range =
+                        parse_push_constant_for_stage(ShaderStageFlags::Vertex, &ast, &resources);
 
-        compiled_vs
-    };
+                    Some((compiled_vs, vs_meta.vertex_layout_info))
+                }
+                None => None,
+            };
 
-    let compiled_fs = {
-        let resolved_path: PathBuf = dir.join(Path::new(&metadata.fs_path));
-        let fs_source = fs::read_to_string(&resolved_path).unwrap();
-        let compiled_fs = compiler
-            .compile_into_spirv(
-                &fs_source,
-                ShaderKind::Fragment,
-                &metadata.fs_path,
-                "main",
-                Some(&compile_options),
-            )
-            .unwrap();
+            let compiled_ms = match ms_path {
+                Some(ms_path) => {
+                    let resolved_path: PathBuf = dir.join(Path::new(&ms_path));
+                    let ms_source = fs::read_to_string(&resolved_path).unwrap();
+                    let compiled_ms = compiler
+                        .compile_into_spirv(
+                            &ms_source,
+                            ShaderKind::Mesh,
+                            &ms_path,
+                            "main",
+                            Some(&compile_options),
+                        )
+                        .unwrap();
 
-        let module = spirv_cross::spirv::Module::from_words(compiled_fs.as_binary());
-        let ast = Ast::parse(&module).unwrap();
+                    let module = spirv_cross::spirv::Module::from_words(compiled_ms.as_binary());
+                    let ast = Ast::parse(&module).unwrap();
 
-        let resources = ast.get_shader_resources().unwrap();
+                    let resources = ast.get_shader_resources().unwrap();
 
-        // build descriptor set layouts
-        build_descriptor_set_layouts_for_stage(
-            &mut sets,
-            &metadata.descriptor_sets,
-            ShaderStageFlags::Fragment,
-            &ast,
-            &resources,
-        );
+                    // build descriptor set layouts
+                    build_descriptor_set_layouts_for_stage(
+                        &mut sets,
+                        &metadata.descriptor_sets,
+                        ShaderStageFlags::Vertex,
+                        &ast,
+                        &resources,
+                    );
 
-        let fs_push_constants =
-            parse_push_constant_for_stage(ShaderStageFlags::Fragment, &ast, &resources);
+                    push_constant_range =
+                        parse_push_constant_for_stage(ShaderStageFlags::Vertex, &ast, &resources);
 
-        if let Some(fs_push_constants) = fs_push_constants {
-            if let Some(push_constant_range) = push_constant_range.as_mut() {
-                if fs_push_constants.size != push_constant_range.size {
-                    panic!("push constant size mismatch between stages");
+                    Some(compiled_ms)
+                }
+                None => None,
+            };
+
+            let compiled_fs = {
+                let resolved_path: PathBuf = dir.join(Path::new(&fs_path));
+                let fs_source = fs::read_to_string(&resolved_path).unwrap();
+                let compiled_fs = compiler
+                    .compile_into_spirv(
+                        &fs_source,
+                        ShaderKind::Fragment,
+                        &fs_path,
+                        "main",
+                        Some(&compile_options),
+                    )
+                    .unwrap();
+
+                let module = spirv_cross::spirv::Module::from_words(compiled_fs.as_binary());
+                let ast = Ast::parse(&module).unwrap();
+
+                let resources = ast.get_shader_resources().unwrap();
+
+                // build descriptor set layouts
+                build_descriptor_set_layouts_for_stage(
+                    &mut sets,
+                    &metadata.descriptor_sets,
+                    ShaderStageFlags::Fragment,
+                    &ast,
+                    &resources,
+                );
+
+                let fs_push_constants =
+                    parse_push_constant_for_stage(ShaderStageFlags::Fragment, &ast, &resources);
+
+                if let Some(fs_push_constants) = fs_push_constants {
+                    if let Some(push_constant_range) = push_constant_range.as_mut() {
+                        if fs_push_constants.size != push_constant_range.size {
+                            panic!("push constant size mismatch between stages");
+                        }
+
+                        push_constant_range.stage_flags |= ShaderStageFlags::Fragment;
+                    } else {
+                        push_constant_range = Some(fs_push_constants);
+                    }
                 }
 
-                push_constant_range.stage_flags |= ShaderStageFlags::Fragment;
-            } else {
-                push_constant_range = Some(fs_push_constants);
+                compiled_fs
+            };
+
+            Technique {
+                push_constant_range,
+                r#type: TechniqueType::Graphics(CookedGraphicsTechnique {
+                    vs_meta: compiled_vs.map(|(compiled_vs, vertex_layout_info)| {
+                        CookedVertexShaderMetadata {
+                            spv: compiled_vs.as_binary().to_vec(),
+                            vertex_layout_info,
+                        }
+                    }),
+                    ms_spv: compiled_ms.map(|x| x.as_binary().to_vec()),
+                    fs_spv: compiled_fs.as_binary().to_vec(),
+                }),
+                descriptor_set_layouts: sets,
             }
         }
+        TechniqueMetadataType::Compute(ComputeTechnique { cs_path }) => {
+            let compiled_cs = {
+                let resolved_path: PathBuf = dir.join(Path::new(&cs_path));
+                let cs_source = fs::read_to_string(&resolved_path).unwrap();
+                let compiled_cs = compiler
+                    .compile_into_spirv(
+                        &cs_source,
+                        ShaderKind::Compute,
+                        &cs_path,
+                        "main",
+                        Some(&compile_options),
+                    )
+                    .unwrap();
 
-        compiled_fs
-    };
+                let module = spirv_cross::spirv::Module::from_words(compiled_cs.as_binary());
+                let ast = Ast::parse(&module).unwrap();
 
-    Technique {
-        push_constant_range,
-        fs_spv: compiled_fs.as_binary().to_vec(),
-        vs_spv: compiled_vs.as_binary().to_vec(),
-        vertex_layout_info: metadata.vs.unwrap().vertex_layout_info,
-        descriptor_set_layouts: sets,
+                let resources = ast.get_shader_resources().unwrap();
+
+                // build descriptor set layouts
+                build_descriptor_set_layouts_for_stage(
+                    &mut sets,
+                    &metadata.descriptor_sets,
+                    ShaderStageFlags::Compute,
+                    &ast,
+                    &resources,
+                );
+
+                push_constant_range =
+                    parse_push_constant_for_stage(ShaderStageFlags::Compute, &ast, &resources);
+
+                compiled_cs
+            };
+
+            Technique {
+                push_constant_range,
+                r#type: TechniqueType::Compute(CookedComputeTechnique {
+                    cs_spv: compiled_cs.as_binary().to_vec(),
+                }),
+                descriptor_set_layouts: sets,
+            }
+        }
     }
 }

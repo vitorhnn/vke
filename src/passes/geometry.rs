@@ -1,12 +1,13 @@
 use crate::allocator::{Allocator, MemoryUsage};
 use crate::device::ImageBarrierParameters;
 use crate::loader::World;
-use crate::technique::{DescriptorSetLayout, Technique};
 use crate::per_frame::PerFrame;
+use crate::technique::{CookedGraphicsTechnique, DescriptorSetLayout, Technique, TechniqueType};
 use crate::texture::Texture;
 use crate::texture_view::TextureView;
 use crate::PerFrameDataUbo;
 use crate::{buffer, technique, Device, FRAMES_IN_FLIGHT, SHADER_MAIN_FN_NAME};
+use crate::technique::PushConstantRange;
 use ash::prelude::VkResult;
 use ash::vk;
 use glam::{Mat4, Vec3};
@@ -33,7 +34,9 @@ pub struct GeometryPass {
 
 fn create_graphics_pipeline(
     device: &Device,
-    technique: &Technique,
+    technique: &CookedGraphicsTechnique,
+    descriptor_set_layouts: &[Option<DescriptorSetLayout>; 4],
+    push_constant_range: &Option<PushConstantRange>,
     render_resolution: vk::Extent2D,
 ) -> Result<
     (
@@ -43,8 +46,9 @@ fn create_graphics_pipeline(
     ),
     Box<dyn Error>,
 > {
+    let vs = &technique.vs_meta.as_ref().expect("hardcoded vs expect");
     let vs_module = unsafe {
-        let info = vk::ShaderModuleCreateInfo::builder().code(&technique.vs_spv);
+        let info = vk::ShaderModuleCreateInfo::builder().code(&vs.spv);
         device.inner.create_shader_module(&info, None)?
     };
 
@@ -67,11 +71,8 @@ fn create_graphics_pipeline(
 
     let stages = [vs_stage_info, fs_stage_info];
 
-    let binding_descriptor = technique
-        .vertex_layout_info
-        .input_binding_description
-        .as_vk();
-    let attribute_descriptors: Vec<_> = technique
+    let binding_descriptor = vs.vertex_layout_info.input_binding_description.as_vk();
+    let attribute_descriptors: Vec<_> = vs
         .vertex_layout_info
         .input_attribute_descriptions
         .iter()
@@ -132,8 +133,7 @@ fn create_graphics_pipeline(
         .logic_op_enable(false)
         .attachments(&color_blend_attachment_states);
 
-    let descriptor_set_layouts = technique
-        .descriptor_set_layouts
+    let descriptor_set_layouts = descriptor_set_layouts
         .iter()
         .filter_map(|x| x.as_ref().map(|layout| layout.as_vk(&device)))
         .collect::<Vec<_>>();
@@ -141,7 +141,7 @@ fn create_graphics_pipeline(
     let pipeline_layout = unsafe {
         let mut info = vk::PipelineLayoutCreateInfo::builder().set_layouts(&descriptor_set_layouts);
 
-        let push_constant_range = technique.push_constant_range.as_ref().map(|x| x.as_vk());
+        let push_constant_range = push_constant_range.as_ref().map(|x| x.as_vk());
 
         if let Some(push_constant_range) = &push_constant_range {
             info = info.push_constant_ranges(std::slice::from_ref(push_constant_range));
@@ -329,9 +329,20 @@ impl GeometryPass {
 
         let technique = technique::compile_shader(Path::new("./glsl/geometry"));
 
-        let (pipeline_layout, pipeline, descriptor_set_layouts) =
-            create_graphics_pipeline(&device, &technique, render_resolution)
-                .expect("failed to create graphics pipeline");
+        let graphics_tecnique = technique
+            .r#type
+            .graphics()
+            .expect("technique was not a graphics technique");
+
+        let (pipeline_layout, pipeline, descriptor_set_layouts) = create_graphics_pipeline(
+            &device,
+            &graphics_tecnique,
+            &technique.descriptor_set_layouts,
+            &technique.push_constant_range,
+            render_resolution,
+        )
+        .expect("failed to create graphics pipeline");
+
         Self {
             device,
             allocator,
