@@ -1,14 +1,13 @@
 use crate::allocator::Allocator;
 use crate::allocator::MemoryUsage;
-use crate::asset::Scene;
+use crate::asset::{Scene, Texture};
 use crate::buffer::Buffer;
-use crate::texture::Texture;
 use crate::texture_view::TextureView;
-use crate::{Device, Transfer};
+use crate::{asset, Device, Transfer};
 use ash::vk;
 use glam::{Mat4, Vec2, Vec3, Vec4};
 use gpu_allocator::vulkan::Allocation;
-use itertools::{all, izip};
+use itertools::izip;
 use std::io::Read;
 use std::mem::size_of;
 use std::rc::Rc;
@@ -114,15 +113,97 @@ pub struct Model {
     pub transform: Mat4,
 }
 
+pub struct Material {
+    pub albedo: Option<TextureView>,
+}
+
 // this couples rendering code and data with world management and logic.
 // this is fine for the purposes of this project (graphics sandbox for my final project)
 // but should be rewritten for any serious attempt at a game engine in the future
 pub struct World {
     pub models: Vec<Model>,
+    pub materials: Vec<Material>,
 }
 
-pub fn load_scene(allocator: Rc<Allocator>, transfer: &mut Transfer, scene: Scene) -> World {
+fn load_texture(device: Rc<Device>, allocator: &Allocator, transfer: &mut Transfer, texture_asset: &Texture) -> TextureView {
+    let (mut texture, allocation) = allocator
+        .create_texture(
+            &vk::ImageCreateInfo::builder()
+                .flags(vk::ImageCreateFlags::empty())
+                .image_type(vk::ImageType::TYPE_2D)
+                .format(texture_asset.info.format)
+                .extent(texture_asset.info.extent)
+                .mip_levels(1)
+                .array_layers(1)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
+                .initial_layout(vk::ImageLayout::UNDEFINED)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE),
+            MemoryUsage::DeviceOnly,
+        )
+        .unwrap();
+
+    texture.associate_allocation(allocation);
+
+    let image = texture.image.clone();
+    let view = TextureView::new(
+        device,
+        texture,
+        &vk::ImageViewCreateInfo::builder()
+            .view_type(vk::ImageViewType::TYPE_2D)
+            // TODO: Check this. There's probably a good reason as to why you can specify different formats
+            // for the image and image view
+            .format(texture_asset.info.format)
+            .components(vk::ComponentMapping::default())
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1
+            })
+            .image(image)
+    ).expect("failed to create image view");
+
+    transfer.upload_image_callback(|buf| {
+        buf[..texture_asset.data.len()].copy_from_slice(&texture_asset.data);
+
+        std::mem::size_of_val(&texture_asset.data)
+    }, &view.texture).expect("upload failed");
+
+    view
+}
+
+fn load_material(device: Rc<Device>, allocator: &Allocator, transfer: &mut Transfer, material: &asset::Material, mut current_idx: usize) -> (usize, Material) {
+    let albedo = material.diffuse.as_ref().map(|diffuse| {
+        load_texture(device.clone(), allocator, transfer, &diffuse)
+    });
+
+    /*
+    if let Some(metallic_roughness) = &material.metallic_roughness {
+        views.push(load_texture(device.clone(), allocator, transfer, metallic_roughness));
+        current_idx += 1;
+    }
+
+    if let Some(normal) = &material.normal {
+        views.push(load_texture(device.clone(), allocator, transfer, normal));
+        current_idx += 1;
+    }
+    */
+
+    (current_idx, Material { albedo })
+}
+
+pub fn load_scene(device: Rc<Device>, allocator: Rc<Allocator>, transfer: &mut Transfer, scene: Scene) -> World {
     let mut models = Vec::new();
+    let mut materials = Vec::new();
+    let mut current_idx = 0;
+
+    for material in scene.materials {
+        let (idx, material) = load_material(device.clone(), &allocator, transfer, &material, current_idx);
+        materials.push(material);
+        current_idx += idx;
+    }
 
     for model in scene.models {
         let mut meshes = Vec::new();
@@ -198,7 +279,7 @@ pub fn load_scene(allocator: Rc<Allocator>, transfer: &mut Transfer, scene: Scen
         })
     }
 
-    transfer.flush();
+    transfer.flush().unwrap();
 
-    World { models }
+    World { models, materials }
 }

@@ -13,6 +13,7 @@ use crate::instance::Instance;
 
 use crate::Texture;
 use gpu_allocator::vulkan::*;
+use gpu_allocator::vulkan::AllocationScheme::{DedicatedBuffer, DedicatedImage};
 
 enum MapInfo {
     Persistent(*mut c_void),
@@ -61,11 +62,12 @@ impl Allocator {
             instance: instance.inner.clone(),
             buffer_device_address: false,
             debug_settings: Default::default(),
+            allocation_sizes: Default::default(),
         })
         .unwrap();
 
         Self {
-            device: device,
+            device,
             inner: Mutex::new(inner),
         }
     }
@@ -90,6 +92,7 @@ impl Allocator {
                 location: to_gpu_allocator(usage),
                 linear: true,
                 requirements: memory_requirements,
+                allocation_scheme: DedicatedBuffer(buffer.inner),
             })
             .unwrap();
 
@@ -124,6 +127,7 @@ impl Allocator {
                 location: to_gpu_allocator(usage),
                 linear: false,
                 requirements: memory_requirements,
+                allocation_scheme: DedicatedImage(texture.image),
             })
             .unwrap();
 
@@ -163,6 +167,6 @@ impl Allocator {
     pub fn free(&self, allocation: Allocation) {
         let mut allocator = self.inner.lock();
 
-        allocator.free(allocation);
+        allocator.free(allocation).expect("allocator free failure");
     }
 }

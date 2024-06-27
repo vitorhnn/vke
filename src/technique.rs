@@ -4,7 +4,7 @@ use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
 use shaderc;
 use shaderc::{ResolvedInclude, ShaderKind};
-use spirv_cross::spirv::{Decoration, Resource, ShaderResources};
+use spirv_cross::spirv::{Decoration, Resource, ShaderResources, Type};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fs;
@@ -150,6 +150,7 @@ impl ShaderStageFlags {
 pub struct DescriptorSetLayoutBinding {
     pub binding: u32,
     pub descriptor_type: DescriptorType,
+    pub descriptor_count: u32,
     pub stage_flags: ShaderStageFlags,
 }
 
@@ -158,7 +159,7 @@ impl DescriptorSetLayoutBinding {
         vk::DescriptorSetLayoutBinding {
             binding: self.binding,
             descriptor_type: self.descriptor_type.into_vk(),
-            descriptor_count: 1,
+            descriptor_count: self.descriptor_count,
             stage_flags: self.stage_flags.as_vk(),
             p_immutable_samplers: ptr::null(),
         }
@@ -315,6 +316,11 @@ fn build_descriptor_set_layouts_for_descriptor_type(
             .get_decoration(resource.id, Decoration::Binding)
             .unwrap();
 
+        let descriptor_count = match ast.get_type(resource.type_id).unwrap() {
+            Type::Image { array, .. } => array[0],
+            _ => 1
+        };
+
         let set = &mut sets[set_index as usize].get_or_insert_with(|| DescriptorSetLayout {
             bindings: HashMap::new(),
             is_update_after_bind: sets_metadata
@@ -333,13 +339,21 @@ fn build_descriptor_set_layouts_for_descriptor_type(
                     );
                 }
 
+                if binding.descriptor_count != descriptor_count {
+                    panic!(
+                        "mismatched descriptor count at set {} binding {}",
+                        set_index, binding_index
+                    );
+                }
+
                 binding.stage_flags |= stage;
             }
             Entry::Vacant(vacant_slot) => {
                 vacant_slot.insert(DescriptorSetLayoutBinding {
                     binding: binding_index,
                     stage_flags: stage,
-                    descriptor_type: descriptor_type,
+                    descriptor_count,
+                    descriptor_type,
                 });
             }
         }

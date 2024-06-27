@@ -48,10 +48,9 @@ mod texture_view;
 mod transfer;
 
 use crate::device::ImageBarrierParameters;
-use crate::loader::{load_png, World};
+use crate::loader::World;
 use crate::passes::geometry::GeometryPass;
 use crate::texture::Texture;
-use crate::texture_view::TextureView;
 use transfer::Transfer;
 
 struct FrameResources {
@@ -181,9 +180,9 @@ impl Application {
             .collect::<Result<_, _>>()?;
 
         let scene = asset::Scene::from_gltf(Path::new("./Sponza.glb"))?;
-        let world = loader::load_scene(allocator.clone(), &mut transfer, scene);
+        let world = loader::load_scene(device.clone(), allocator.clone(), &mut transfer, scene);
 
-        let geometry_pass = GeometryPass::new(device.clone(), allocator.clone(), desired_extent);
+        let geometry_pass = GeometryPass::new(device.clone(), allocator.clone(), desired_extent, &world);
 
         println!("VKe: application created");
         println!(
@@ -327,7 +326,7 @@ impl Application {
 
         unsafe {
             self.geometry_pass
-                .execute(self.current_frame, &command_buffer, &self.world, frame_ubo);
+                .execute(self.current_frame, &command_buffer, &self.world, frame_ubo).unwrap();
 
             self.device.insert_image_barrier(&ImageBarrierParameters {
                 command_buffer,

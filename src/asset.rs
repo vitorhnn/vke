@@ -1,9 +1,12 @@
+use std::convert::TryInto;
 use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
+use gltf::image::{Format, Source};
 use gltf::mesh::util::{ReadIndices, ReadTexCoords};
 use gltf::mesh::Mode;
 use gltf::scene::Transform;
 use gltf::Semantic;
 use snafu::prelude::*;
+use ash::vk;
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -25,8 +28,41 @@ pub enum Error {
 
 #[derive(Debug)]
 pub struct Texture {
-    info: crate::texture::TextureInfo,
-    data: Vec<u8>,
+    pub info: crate::texture::TextureInfo,
+    pub data: Vec<u8>,
+}
+
+impl Texture {
+    fn from_gltf(tex: &gltf::Texture, images: &Vec<gltf::image::Data>) -> Self {
+        use gltf::image::Format;
+        let image = &images[tex.source().index()];
+        let info = crate::texture::TextureInfo {
+            extent: vk::Extent3D {
+                depth: 1,
+                width: image.width,
+                height: image.height,
+            },
+            // TODO: this is probably incorrect. check later if we have color problems
+            format: match image.format {
+                Format::R8 => vk::Format::R8_UNORM,
+                Format::R8G8 => vk::Format::R8G8_UNORM,
+                Format::R8G8B8 => vk::Format::R8G8B8_UNORM,
+                Format::R8G8B8A8 => vk::Format::R8G8B8A8_UNORM,
+                Format::R16 => vk::Format::R16_UNORM,
+                Format::R16G16 => vk::Format::R16G16_UNORM,
+                Format::R16G16B16 => vk::Format::R16G16B16_UNORM,
+                Format::R16G16B16A16 => vk::Format::R16G16B16A16_UNORM,
+                Format::R32G32B32FLOAT => vk::Format::R32G32B32_SFLOAT,
+                Format::R32G32B32A32FLOAT => vk::Format::R32G32B32A32_SFLOAT,
+                _ => todo!()
+            }
+        };
+
+        Self {
+            data: image.pixels.clone(),
+            info
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -36,6 +72,7 @@ pub struct Mesh {
     pub uvs: Vec<Vec2>,
     pub normals: Vec<Vec3>,
     pub tangents: Vec<Vec4>,
+    pub material_index: u32,
 }
 
 #[derive(Debug)]
@@ -45,13 +82,37 @@ pub struct Model {
 }
 
 #[derive(Debug)]
+pub struct Material {
+    pub base_color_factor: Vec4,
+    pub diffuse: Option<Texture>,
+    pub normal: Option<Texture>,
+    pub metallic_roughness: Option<Texture>,
+}
+
+#[derive(Debug)]
 pub struct Scene {
     pub models: Vec<Model>,
+    pub materials: Vec<Material>
 }
 
 impl Scene {
     pub fn from_gltf(path: &std::path::Path) -> Result<Self, Error> {
         let (document, buffers, images) = gltf::import(path).context(ImportSnafu {})?;
+
+        let mut materials = Vec::new();
+
+        for material in document.materials() {
+            let base_color_factor: Vec4 = material.pbr_metallic_roughness().base_color_factor().into();
+            let diffuse = material.pbr_metallic_roughness().base_color_texture().map(|image| Texture::from_gltf(&image.texture(), &images));
+            let metallic_roughness = material.pbr_metallic_roughness().metallic_roughness_texture().map(|image| Texture::from_gltf(&image.texture(), &images));
+            let normal = material.normal_texture().map(|image| Texture::from_gltf(&image.texture(), &images));
+            materials.push(Material {
+                base_color_factor,
+                diffuse,
+                metallic_roughness,
+                normal,
+            })
+        }
 
         let default_scene = document.default_scene().ok_or(Error::NoDefaultScene {})?;
 
@@ -119,12 +180,16 @@ impl Scene {
                         unimplemented!()
                     };
 
+                    // idx 0 is used for the default material
+                    let material_index = primitive.material().index().map_or(0, |idx| idx + 1).try_into().expect("material index overflow");
+
                     model.meshes.push(Mesh {
                         vertices,
                         uvs,
                         normals,
                         tangents,
                         indices,
+                        material_index,
                     })
                 }
             }
@@ -132,7 +197,7 @@ impl Scene {
             models.push(model);
         }
 
-        Ok(Self { models })
+        Ok(Self { models, materials })
     }
 }
 

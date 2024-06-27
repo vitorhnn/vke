@@ -16,12 +16,14 @@ use std::error::Error;
 use std::mem::MaybeUninit;
 use std::path::Path;
 use std::rc::Rc;
+use png::Compression::Default;
 
 pub struct GeometryPass {
     device: Rc<Device>,
     allocator: Rc<Allocator>,
     technique: Technique,
-    descriptor_pools: PerFrame<vk::DescriptorPool>,
+    frame_pools: PerFrame<vk::DescriptorPool>,
+    heap_pool: vk::DescriptorPool,
     per_frame_uniform_buffer: buffer::Buffer,
     ubo_allocation: Allocation,
     pub color_target_views: PerFrame<TextureView>,
@@ -207,6 +209,7 @@ impl GeometryPass {
         device: Rc<Device>,
         allocator: Rc<Allocator>,
         render_resolution: vk::Extent2D,
+        world: &World,
     ) -> Self {
         let descriptor_pools = PerFrame::new(|| {
             let pool_sizes = [vk::DescriptorPoolSize {
@@ -225,6 +228,31 @@ impl GeometryPass {
                     .expect("pool allocation failure")
             }
         });
+
+        let heap_pool = {
+            let pool_sizes = [
+                vk::DescriptorPoolSize {
+                    // worst case sizing, all mtls with 3 images
+                    descriptor_count: (world.materials.len() * 3) as u32,
+                    ty: vk::DescriptorType::SAMPLED_IMAGE,
+                },
+                vk::DescriptorPoolSize {
+                    descriptor_count: 4,
+                    ty: vk::DescriptorType::SAMPLER,
+                }
+            ];
+
+            let pool_create_info = vk::DescriptorPoolCreateInfo::builder()
+                .pool_sizes(&pool_sizes)
+                .max_sets(1);
+
+            unsafe {
+                device
+                    .inner
+                    .create_descriptor_pool(&pool_create_info, None)
+                    .expect("pool allocation failure")
+            }
+        };
 
         let (per_frame_uniform_buffer, ubo_allocation) = {
             let buffer_create_info = vk::BufferCreateInfo::builder()
@@ -343,11 +371,12 @@ impl GeometryPass {
         )
         .expect("failed to create graphics pipeline");
 
-        Self {
+        let pass = Self {
             device,
             allocator,
             technique,
-            descriptor_pools,
+            frame_pools: descriptor_pools,
+            heap_pool,
             per_frame_uniform_buffer,
             ubo_allocation,
             color_target_views,
@@ -356,7 +385,44 @@ impl GeometryPass {
             pipeline,
             pipeline_layout,
             descriptor_set_layouts,
+        };
+
+        pass.prepare_material_descriptor_set(world);
+
+        pass
+    }
+
+    fn prepare_material_descriptor_set(&self, world: &World) {
+        let set_layout = self.descriptor_set_layouts[1];
+        let allocate_info = vk::DescriptorSetAllocateInfo {
+            descriptor_pool: self.heap_pool,
+            descriptor_set_count: 1,
+            p_set_layouts: &set_layout,
+            ..Default::default()
+        };
+
+        let descriptor_set = unsafe { self.device.inner.allocate_descriptor_sets(&allocate_info) }.unwrap()[0];
+
+        let mut image_infos = Vec::with_capacity(world.materials.len());
+        for material in world.materials {
+            image_infos.push(vk::DescriptorImageInfo {
+                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                image_view: material.albedo.as_ref().unwrap().inner,
+                sampler: vk::Sampler::null(),
+            });
         }
+
+        let write = vk::WriteDescriptorSet {
+            dst_set: descriptor_set,
+            dst_binding: 1,
+            dst_array_element: 0,
+            descriptor_type: vk::DescriptorType::SAMPLED_IMAGE,
+            p_image_info: image_infos.as_ptr(),
+            descriptor_count: world.materials.len() as u32,
+            ..Default::default()
+        };
+
+        unsafe { self.device.inner.update_descriptor_sets(std::slice::from_ref(&write), &[]); }
     }
 
     pub fn prepare_frame_wide_descriptor_set(
@@ -376,7 +442,7 @@ impl GeometryPass {
 
         self.allocator.unmap(&self.ubo_allocation);
 
-        let descriptor_pool = self.descriptor_pools.get_resource_for_frame(frame_idx);
+        let descriptor_pool = self.frame_pools.get_resource_for_frame(frame_idx);
 
         let set = unsafe {
             let set_layout = [self.descriptor_set_layouts[0]];
@@ -427,7 +493,7 @@ impl GeometryPass {
         let depth_target = self.depth_target_views.get_resource_for_frame(frame_idx);
 
         unsafe {
-            let pool = self.descriptor_pools.get_resource_for_frame(frame_idx);
+            let pool = self.frame_pools.get_resource_for_frame(frame_idx);
 
             self.device
                 .inner

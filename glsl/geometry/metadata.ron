@@ -42,5 +42,11 @@ TechniqueMetadata(
         0: DescriptorSetMetadata(
             is_update_after_bind: false,
         ),
+        1: DescriptorSetMetadata(
+            is_update_after_bind: true,
+        ),
+        2: DescriptorSetMetadata(
+            is_update_after_bind: false,
+        ),
     },
 )
