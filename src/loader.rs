@@ -138,7 +138,8 @@ fn load_texture(device: Rc<Device>, allocator: &Allocator, transfer: &mut Transf
                 .samples(vk::SampleCountFlags::TYPE_1)
                 .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
                 .initial_layout(vk::ImageLayout::UNDEFINED)
-                .sharing_mode(vk::SharingMode::EXCLUSIVE),
+                .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                .tiling(vk::ImageTiling::LINEAR),
             MemoryUsage::DeviceOnly,
         )
         .unwrap();

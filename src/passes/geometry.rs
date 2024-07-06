@@ -2,21 +2,19 @@ use crate::allocator::{Allocator, MemoryUsage};
 use crate::device::ImageBarrierParameters;
 use crate::loader::World;
 use crate::per_frame::PerFrame;
-use crate::technique::{CookedGraphicsTechnique, DescriptorSetLayout, Technique, TechniqueType};
-use crate::texture::Texture;
+use crate::technique::{CookedGraphicsTechnique, DescriptorSetLayout, Technique};
 use crate::texture_view::TextureView;
 use crate::PerFrameDataUbo;
 use crate::{buffer, technique, Device, FRAMES_IN_FLIGHT, SHADER_MAIN_FN_NAME};
 use crate::technique::PushConstantRange;
 use ash::prelude::VkResult;
 use ash::vk;
-use glam::{Mat4, Vec3};
+use glam::Mat4;
 use gpu_allocator::vulkan::Allocation;
 use std::error::Error;
-use std::mem::MaybeUninit;
-use std::path::Path;
 use std::rc::Rc;
-use png::Compression::Default;
+use std::path::Path;
+use std::default::Default;
 
 pub struct GeometryPass {
     device: Rc<Device>,
@@ -404,7 +402,7 @@ impl GeometryPass {
         let descriptor_set = unsafe { self.device.inner.allocate_descriptor_sets(&allocate_info) }.unwrap()[0];
 
         let mut image_infos = Vec::with_capacity(world.materials.len());
-        for material in world.materials {
+        for material in &world.materials {
             image_infos.push(vk::DescriptorImageInfo {
                 image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                 image_view: material.albedo.as_ref().unwrap().inner,

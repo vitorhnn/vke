@@ -33,33 +33,36 @@ pub struct Texture {
 }
 
 impl Texture {
-    fn from_gltf(tex: &gltf::Texture, images: &Vec<gltf::image::Data>) -> Self {
-        use gltf::image::Format;
-        let image = &images[tex.source().index()];
+    fn from_gltf(tex: &gltf::Texture, buffers: &Vec<gltf::buffer::Data>) -> Self {
+        use image::DynamicImage;
+        let bytes = match tex.source().source() {
+            gltf::image::Source::View { view, .. } => {
+                let start = view.offset();
+                let end = start + view.length();
+                &buffers[view.buffer().index()][start..end]
+            }
+            _ => todo!()
+        };
+        let image = image::load_from_memory(bytes).unwrap();
+        let width = image.width();
+        let height = image.height();
+        let (format, converted_bytes) = match image {
+            DynamicImage::ImageRgb8(_) => (vk::Format::R8G8B8A8_UNORM, image.into_rgba8().into_raw()),
+            DynamicImage::ImageRgba8(_) => (vk::Format::R8G8B8A8_UNORM, Vec::from(bytes)),
+            _ => todo!()
+        };
         let info = crate::texture::TextureInfo {
             extent: vk::Extent3D {
                 depth: 1,
-                width: image.width,
-                height: image.height,
+                width, 
+                height,
             },
             // TODO: this is probably incorrect. check later if we have color problems
-            format: match image.format {
-                Format::R8 => vk::Format::R8_UNORM,
-                Format::R8G8 => vk::Format::R8G8_UNORM,
-                Format::R8G8B8 => vk::Format::R8G8B8_UNORM,
-                Format::R8G8B8A8 => vk::Format::R8G8B8A8_UNORM,
-                Format::R16 => vk::Format::R16_UNORM,
-                Format::R16G16 => vk::Format::R16G16_UNORM,
-                Format::R16G16B16 => vk::Format::R16G16B16_UNORM,
-                Format::R16G16B16A16 => vk::Format::R16G16B16A16_UNORM,
-                Format::R32G32B32FLOAT => vk::Format::R32G32B32_SFLOAT,
-                Format::R32G32B32A32FLOAT => vk::Format::R32G32B32A32_SFLOAT,
-                _ => todo!()
-            }
+            format,
         };
 
         Self {
-            data: image.pixels.clone(),
+            data: converted_bytes,
             info
         }
     }
@@ -97,15 +100,21 @@ pub struct Scene {
 
 impl Scene {
     pub fn from_gltf(path: &std::path::Path) -> Result<Self, Error> {
-        let (document, buffers, images) = gltf::import(path).context(ImportSnafu {})?;
+        // we don't use gltf::import because it converts `image` images to its own structs
+        // which is bad because we need to perform 24bpp conversion to 32bpp, which we would
+        // have for free with the image crate.
+        // so we load our own images.
+        let gltf = gltf::Gltf::open(path).context(ImportSnafu)?;
+        let document = &gltf.document;
+        let buffers = gltf::import_buffers(document, path.parent(), gltf.blob).context(ImportSnafu)?;
 
         let mut materials = Vec::new();
 
         for material in document.materials() {
             let base_color_factor: Vec4 = material.pbr_metallic_roughness().base_color_factor().into();
-            let diffuse = material.pbr_metallic_roughness().base_color_texture().map(|image| Texture::from_gltf(&image.texture(), &images));
-            let metallic_roughness = material.pbr_metallic_roughness().metallic_roughness_texture().map(|image| Texture::from_gltf(&image.texture(), &images));
-            let normal = material.normal_texture().map(|image| Texture::from_gltf(&image.texture(), &images));
+            let diffuse = material.pbr_metallic_roughness().base_color_texture().map(|image| Texture::from_gltf(&image.texture(), &buffers));
+            let metallic_roughness = material.pbr_metallic_roughness().metallic_roughness_texture().map(|image| Texture::from_gltf(&image.texture(), &buffers));
+            let normal = material.normal_texture().map(|image| Texture::from_gltf(&image.texture(), &buffers));
             materials.push(Material {
                 base_color_factor,
                 diffuse,
