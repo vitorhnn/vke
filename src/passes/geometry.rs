@@ -15,6 +15,8 @@ use std::error::Error;
 use std::rc::Rc;
 use std::path::Path;
 use std::default::Default;
+use ash::vk::DescriptorPoolCreateFlags;
+use crate::sampler::Sampler;
 
 pub struct GeometryPass {
     device: Rc<Device>,
@@ -30,6 +32,8 @@ pub struct GeometryPass {
     pipeline_layout: vk::PipelineLayout,
     descriptor_set_layouts: Vec<vk::DescriptorSetLayout>,
     render_resolution: vk::Extent2D,
+    heap_set: vk::DescriptorSet,
+    linear_sampler: Sampler,
 }
 
 fn create_graphics_pipeline(
@@ -202,6 +206,22 @@ fn create_graphics_pipeline(
     Ok((pipeline_layout, pipeline, descriptor_set_layouts))
 }
 
+#[repr(packed)]
+struct PushConstant {
+    model: glam::Mat4,
+    base_color: glam::Vec4,
+    albedo_index: u32,
+    metalic_index: u32,
+    normal_index: u32,
+}
+
+unsafe fn as_u8_slice<T: Sized>(p: &T) -> &[u8] {
+    core::slice::from_raw_parts(
+        (p as *const T) as *const u8,
+        core::mem::size_of::<T>(),
+    )
+}
+
 impl GeometryPass {
     pub fn new(
         device: Rc<Device>,
@@ -231,7 +251,7 @@ impl GeometryPass {
             let pool_sizes = [
                 vk::DescriptorPoolSize {
                     // worst case sizing, all mtls with 3 images
-                    descriptor_count: (world.materials.len() * 3) as u32,
+                    descriptor_count: 4096,//(world.materials.len() * 3) as u32,
                     ty: vk::DescriptorType::SAMPLED_IMAGE,
                 },
                 vk::DescriptorPoolSize {
@@ -242,6 +262,7 @@ impl GeometryPass {
 
             let pool_create_info = vk::DescriptorPoolCreateInfo::builder()
                 .pool_sizes(&pool_sizes)
+                .flags(DescriptorPoolCreateFlags::UPDATE_AFTER_BIND)
                 .max_sets(1);
 
             unsafe {
@@ -369,6 +390,17 @@ impl GeometryPass {
         )
         .expect("failed to create graphics pipeline");
 
+        let linear_sampler = Sampler::new(device.clone(), vk::SamplerCreateInfo::builder()
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .address_mode_u(vk::SamplerAddressMode::REPEAT)
+            .address_mode_v(vk::SamplerAddressMode::REPEAT)
+            .address_mode_w(vk::SamplerAddressMode::REPEAT)
+            .build()
+        ).unwrap();
+
+        let heap_set = GeometryPass::prepare_material_descriptor_set(&device, &linear_sampler, &descriptor_set_layouts, heap_pool, world);
+
         let pass = Self {
             device,
             allocator,
@@ -383,23 +415,23 @@ impl GeometryPass {
             pipeline,
             pipeline_layout,
             descriptor_set_layouts,
+            heap_set,
+            linear_sampler,
         };
-
-        pass.prepare_material_descriptor_set(world);
 
         pass
     }
 
-    fn prepare_material_descriptor_set(&self, world: &World) {
-        let set_layout = self.descriptor_set_layouts[1];
+    fn prepare_material_descriptor_set(device: &Device, linear_sampler: &Sampler, set_layouts: &[vk::DescriptorSetLayout], heap_pool: vk::DescriptorPool, world: &World) -> vk::DescriptorSet {
+        let set_layout = &set_layouts[1];
         let allocate_info = vk::DescriptorSetAllocateInfo {
-            descriptor_pool: self.heap_pool,
+            descriptor_pool: heap_pool,
             descriptor_set_count: 1,
-            p_set_layouts: &set_layout,
+            p_set_layouts: set_layout,
             ..Default::default()
         };
 
-        let descriptor_set = unsafe { self.device.inner.allocate_descriptor_sets(&allocate_info) }.unwrap()[0];
+        let descriptor_set = unsafe { device.inner.allocate_descriptor_sets(&allocate_info) }.unwrap()[0];
 
         let mut image_infos = Vec::with_capacity(world.materials.len());
         for material in &world.materials {
@@ -410,17 +442,35 @@ impl GeometryPass {
             });
         }
 
-        let write = vk::WriteDescriptorSet {
-            dst_set: descriptor_set,
-            dst_binding: 1,
-            dst_array_element: 0,
-            descriptor_type: vk::DescriptorType::SAMPLED_IMAGE,
-            p_image_info: image_infos.as_ptr(),
-            descriptor_count: world.materials.len() as u32,
+        let sampler_img_info = vk::DescriptorImageInfo {
+            sampler: linear_sampler.inner,
             ..Default::default()
         };
 
-        unsafe { self.device.inner.update_descriptor_sets(std::slice::from_ref(&write), &[]); }
+        let writes = [
+            vk::WriteDescriptorSet {
+                dst_set: descriptor_set,
+                dst_binding: 0,
+                dst_array_element: 0,
+                descriptor_type: vk::DescriptorType::SAMPLER,
+                p_image_info: &sampler_img_info,
+                descriptor_count: 1,
+                ..Default::default()
+            },
+            vk::WriteDescriptorSet {
+                dst_set: descriptor_set,
+                dst_binding: 1,
+                dst_array_element: 0,
+                descriptor_type: vk::DescriptorType::SAMPLED_IMAGE,
+                p_image_info: image_infos.as_ptr(),
+                descriptor_count: world.materials.len() as u32,
+                ..Default::default()
+            }
+        ];
+
+    unsafe { device.inner.update_descriptor_sets(&writes, &[]); }
+
+        descriptor_set
     }
 
     pub fn prepare_frame_wide_descriptor_set(
@@ -544,7 +594,7 @@ impl GeometryPass {
                     },
                 },
                 image_view: color_target.inner,
-                image_layout: vk::ImageLayout::ATTACHMENT_OPTIMAL_KHR,
+                image_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                 load_op: vk::AttachmentLoadOp::CLEAR,
                 store_op: vk::AttachmentStoreOp::STORE,
                 ..Default::default()
@@ -598,6 +648,15 @@ impl GeometryPass {
                 &[],
             );
 
+            self.device.inner.cmd_bind_descriptor_sets(
+                *command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline_layout,
+                1,
+                std::slice::from_ref(&self.heap_set),
+                 &[],
+            );
+
             for model in &world.models {
                 // TODO: this is *really, really* bad for CPU performance. we should batch static geometry in a single vertex buffer.
                 for mesh in &model.meshes {
@@ -617,10 +676,15 @@ impl GeometryPass {
                         vk::IndexType::UINT16,
                     );
 
-                    // TODO won't be identity in the future
-                    let model = Mat4::IDENTITY;
+                    let push_constants = PushConstant {
+                        model: model.transform,
+                        base_color: glam::Vec4::new(0.0, 0.0, 0.0, 0.0),
+                        albedo_index: 0,
+                        metalic_index: 0,
+                        normal_index: 0,
+                    };
 
-                    let ptr = bytemuck::cast_slice(model.as_ref());
+                    let ptr = as_u8_slice(&push_constants);
 
                     self.device.inner.cmd_push_constants(
                         *command_buffer,

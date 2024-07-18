@@ -1,4 +1,4 @@
-layout(push_constant) uniform PushConstants {
+layout(push_constant, std430) uniform PushConstants {
     mat4 model;
     vec4 baseColor;
     uint albedoIndex;
