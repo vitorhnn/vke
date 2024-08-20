@@ -10,7 +10,7 @@ edition = "2018"
 ash = "0.37"
 sdl2 = "0.36"
 memoffset = "0.9"
-glam = "0.27"
+glam = { version = "0.28", features = ["bytemuck"] }
 png = "0.17"
 parking_lot = "0.12"
 smallvec = "1"
@@ -25,6 +25,7 @@ spirv_cross = { git = "https://github.com/vitorhnn/spirv_cross.git", features = 
 bitflags = { version = "2.0.0-rc.1", features = ["serde"] }
 ron = "0.8.0"
 image = { version = "0.25.1", features = ["png"] }
+bytemuck = { version = "1", features = ["derive"] }
 
 #[profile.dev]
 #opt-level=1

@@ -12,7 +12,7 @@ use std::io::Read;
 use std::mem::size_of;
 use std::rc::Rc;
 
-pub fn load_png(
+/*pub fn load_png(
     device: Rc<Device>,
     source: &mut impl Read,
     allocator: &Allocator,
@@ -78,10 +78,10 @@ pub fn load_png(
     transfer.flush().unwrap();
 
     (view, allocation)
-}
+}*/
 
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
-#[derive(Debug, Clone)]
 struct PosUvNormalTangentVertex {
     pos: Vec3,
     uv: Vec2,
@@ -96,6 +96,7 @@ pub struct Mesh {
     pub idx_allocation: Option<Allocation>,
     pub allocator: Rc<Allocator>,
     pub idx_count: u32,
+    pub material_idx: u32,
 }
 
 impl Drop for Mesh {
@@ -114,7 +115,7 @@ pub struct Model {
 }
 
 pub struct Material {
-    pub albedo: Option<TextureView>,
+    pub albedo: Option<(u32, TextureView)>,
 }
 
 // this couples rendering code and data with world management and logic.
@@ -166,17 +167,19 @@ fn load_texture(device: Rc<Device>, allocator: &Allocator, transfer: &mut Transf
             .image(image)
     ).expect("failed to create image view");
 
-    transfer.upload_image_callback(|buf| {
-        buf[..texture_asset.data.len()].copy_from_slice(&texture_asset.data);
+    let len = texture_asset.data.len();
+    transfer.upload_image_callback(len, |buf| {
+        buf[..len].copy_from_slice(&texture_asset.data);
 
-        std::mem::size_of_val(&texture_asset.data)
+        len
     }, &view.texture).expect("upload failed");
 
     view
 }
 
-fn load_material(device: Rc<Device>, allocator: &Allocator, transfer: &mut Transfer, material: &asset::Material, mut current_idx: usize) -> (usize, Material) {
+fn load_material(device: Rc<Device>, allocator: &Allocator, transfer: &mut Transfer, material: &asset::Material, mut current_idx: u32) -> (u32, Material) {
     let albedo = material.diffuse.as_ref().map(|diffuse| {
+        current_idx += 1;
         load_texture(device.clone(), allocator, transfer, &diffuse)
     });
 
@@ -192,7 +195,7 @@ fn load_material(device: Rc<Device>, allocator: &Allocator, transfer: &mut Trans
     }
     */
 
-    (current_idx, Material { albedo })
+    (current_idx, Material { albedo: albedo.map(|x| (current_idx, x)) })
 }
 
 pub fn load_scene(device: Rc<Device>, allocator: Rc<Allocator>, transfer: &mut Transfer, scene: Scene) -> World {
@@ -226,13 +229,14 @@ pub fn load_scene(device: Rc<Device>, allocator: Rc<Allocator>, transfer: &mut T
 
             transfer
                 .upload_buffer_callback(
+                    buf_size as usize,
                     |buf| {
-                        for (pos, uv, normal, tangent, storage) in izip!(
+                        let mut used = 0;
+                        for (pos, uv, normal, tangent) in izip!(
                             &mesh.vertices,
                             &mesh.uvs,
                             &mesh.normals,
                             &mesh.tangents,
-                            buf
                         ) {
                             let vtx = PosUvNormalTangentVertex {
                                 pos: *pos,
@@ -241,9 +245,11 @@ pub fn load_scene(device: Rc<Device>, allocator: Rc<Allocator>, transfer: &mut T
                                 tangent: *tangent,
                             };
 
-                            *storage = vtx.clone();
+                            let slice = bytemuck::bytes_of(&vtx);
+                            buf[used..(used + slice.len())].copy_from_slice(slice);
+                            used += slice.len();
                         }
-
+                        assert_eq!(used, buf_size as usize);
                         buf_size as usize
                     },
                     &buf,
@@ -262,7 +268,7 @@ pub fn load_scene(device: Rc<Device>, allocator: Rc<Allocator>, transfer: &mut T
                 )
                 .unwrap();
 
-            transfer.upload_buffer(&mesh.indices, &idx_buf).unwrap();
+            transfer.upload_buffer(bytemuck::cast_slice(&mesh.indices), &idx_buf).unwrap();
 
             meshes.push(Mesh {
                 allocation: Some(allocation),
@@ -271,6 +277,7 @@ pub fn load_scene(device: Rc<Device>, allocator: Rc<Allocator>, transfer: &mut T
                 buffer: buf,
                 idx_count: mesh.indices.len() as u32,
                 allocator: allocator.clone(),
+                material_idx: mesh.material_index,
             })
         }
 

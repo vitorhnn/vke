@@ -206,20 +206,15 @@ fn create_graphics_pipeline(
     Ok((pipeline_layout, pipeline, descriptor_set_layouts))
 }
 
-#[repr(packed)]
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct PushConstant {
     model: glam::Mat4,
     base_color: glam::Vec4,
     albedo_index: u32,
     metalic_index: u32,
     normal_index: u32,
-}
-
-unsafe fn as_u8_slice<T: Sized>(p: &T) -> &[u8] {
-    core::slice::from_raw_parts(
-        (p as *const T) as *const u8,
-        core::mem::size_of::<T>(),
-    )
+    padding: u32,
 }
 
 impl GeometryPass {
@@ -437,7 +432,7 @@ impl GeometryPass {
         for material in &world.materials {
             image_infos.push(vk::DescriptorImageInfo {
                 image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                image_view: material.albedo.as_ref().unwrap().inner,
+                image_view: material.albedo.as_ref().unwrap().1.inner,
                 sampler: vk::Sampler::null(),
             });
         }
@@ -676,15 +671,18 @@ impl GeometryPass {
                         vk::IndexType::UINT16,
                     );
 
+                    let albedo_index = world.materials[(mesh.material_idx as usize) - 1].albedo.as_ref().unwrap().0;
+
                     let push_constants = PushConstant {
                         model: model.transform,
                         base_color: glam::Vec4::new(0.0, 0.0, 0.0, 0.0),
-                        albedo_index: 0,
-                        metalic_index: 0,
-                        normal_index: 0,
+                        albedo_index,
+                        metalic_index: 1,
+                        normal_index: 1,
+                        padding: 0
                     };
 
-                    let ptr = as_u8_slice(&push_constants);
+                    let ptr = bytemuck::bytes_of(&push_constants);
 
                     self.device.inner.cmd_push_constants(
                         *command_buffer,

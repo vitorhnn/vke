@@ -169,35 +169,32 @@ impl Transfer {
         })
     }
 
-    fn upload_to_staging_buffer<T, F>(&mut self, callback: F) -> (usize, usize)
+    fn upload_to_staging_buffer<F>(&mut self, len: usize, callback: F) -> usize
     where
-        T: Clone,
-        F: FnOnce(&mut [T]) -> usize,
+        F: FnOnce(&mut [u8]) -> usize,
     {
         unsafe {
-            let slice = std::slice::from_raw_parts_mut(
-                self.ptr.add(self.used),
-                STAGING_BUFFER_SIZE - self.used,
-            );
+            let align = (len + 256 - 1) & !(256 - 1);
+            if align > STAGING_BUFFER_SIZE - self.used {
+                eprintln!("staging buffer overflow, flushing");
+                self.flush().expect("flush failure");
+            }
 
-            // HACK: this is likely BEYOND broken. check here if we get vertex corruption
-            let (prefix, aligned, _suffix) = slice.align_to_mut::<T>();
+            let slice = std::slice::from_raw_parts_mut(self.ptr.add(self.used), len);
 
-            let written = callback(aligned);
+            let written = callback(slice);
+            let begin = self.used;
+            self.used += align;
 
-            let start_of_data = prefix.len() + self.used;
-            self.used += prefix.len() + written;
-
-            (written, start_of_data)
+            begin
         }
     }
 
-    pub fn upload_buffer_callback<T, F>(&mut self, callback: F, dest: &Buffer) -> VkResult<()>
+    pub fn upload_buffer_callback<F>(&mut self, len: usize, callback: F, dest: &Buffer) -> VkResult<()>
     where
-        T: Clone,
-        F: FnOnce(&mut [T]) -> usize,
+        F: FnOnce(&mut [u8]) -> usize,
     {
-        let (written, start_of_data) = self.upload_to_staging_buffer(callback);
+        let start_of_data = self.upload_to_staging_buffer(len, callback);
 
         if let Some(transfer_ctx) = &mut self.transfer_queue_ctx {
             unsafe {
@@ -210,8 +207,8 @@ impl Transfer {
                         dst_access_mask: vk::AccessFlags::empty(),
                         src_queue_family_index: transfer_ctx.queue.family_index,
                         dst_queue_family_index: self.graphics_queue_ctx.queue.family_index,
-                        offset: 0,
-                        size: written as u64,
+                        offset: start_of_data as u64,
+                        size: len as u64,
                         ..Default::default()
                     });
 
@@ -221,7 +218,7 @@ impl Transfer {
                     copy: vk::BufferCopy {
                         src_offset: start_of_data as u64,
                         dst_offset: 0,
-                        size: written as u64,
+                        size: len as u64,
                     },
                 });
 
@@ -235,7 +232,7 @@ impl Transfer {
                         src_queue_family_index: transfer_ctx.queue.family_index,
                         dst_queue_family_index: self.graphics_queue_ctx.queue.family_index,
                         offset: 0,
-                        size: written as u64,
+                        size: len as u64,
                         ..Default::default()
                     });
 
@@ -246,24 +243,23 @@ impl Transfer {
         }
     }
 
-    pub fn upload_buffer<T: Copy>(&mut self, data: &[T], dest: &Buffer) -> VkResult<()> {
+    pub fn upload_buffer(&mut self, data: &[u8], dest: &Buffer) -> VkResult<()> {
         self.upload_buffer_callback(
+            data.len(),
             |staging_buffer| {
                 staging_buffer[..data.len()].copy_from_slice(data);
 
-                eprintln!("size of data is {}", std::mem::size_of_val(data));
-                std::mem::size_of_val(data)
+                data.len()
             },
             dest,
         )
     }
 
-    pub fn upload_image_callback<T, F>(&mut self, callback: F, dest: &Texture) -> VkResult<()>
+    pub fn upload_image_callback<F>(&mut self, len: usize, callback: F, dest: &Texture) -> VkResult<()>
     where
-        T: Copy,
-        F: FnOnce(&mut [T]) -> usize,
+        F: FnOnce(&mut [u8]) -> usize,
     {
-        let (written, start_of_data) = self.upload_to_staging_buffer(callback);
+        let start_of_data = self.upload_to_staging_buffer(len, callback);
 
         if let Some(transfer_ctx) = &mut self.transfer_queue_ctx {
             transfer_ctx
@@ -291,7 +287,7 @@ impl Transfer {
                 src: BufferSlice {
                     buffer: self.buffer.inner,
                     offset: start_of_data as u64,
-                    size: written as u64,
+                    size: len as u64,
                 },
                 dst_image: dest.image,
                 copy_op: vk::BufferImageCopy {

@@ -46,11 +46,7 @@ impl Texture {
         let image = image::load_from_memory(bytes).unwrap();
         let width = image.width();
         let height = image.height();
-        let (format, converted_bytes) = match image {
-            DynamicImage::ImageRgb8(_) => (vk::Format::R8G8B8A8_UNORM, image.into_rgba8().into_raw()),
-            DynamicImage::ImageRgba8(_) => (vk::Format::R8G8B8A8_UNORM, Vec::from(bytes)),
-            _ => todo!()
-        };
+        let decoded_bytes = image.into_rgba8().into_raw();
         let info = crate::texture::TextureInfo {
             extent: vk::Extent3D {
                 depth: 1,
@@ -58,11 +54,11 @@ impl Texture {
                 height,
             },
             // TODO: this is probably incorrect. check later if we have color problems
-            format,
+            format: vk::Format::R8G8B8A8_UNORM,
         };
 
         Self {
-            data: converted_bytes,
+            data: decoded_bytes,
             info
         }
     }

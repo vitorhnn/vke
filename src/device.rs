@@ -191,9 +191,7 @@ impl Device {
                     .into_iter()
                     .any(|present_mode| present_mode == desired_present_mode);
 
-                Ok((props.device_type == vk::PhysicalDeviceType::DISCRETE_GPU
-                    || props.device_type == vk::PhysicalDeviceType::INTEGRATED_GPU)
-                    && suitable_swapchain_format
+                Ok(suitable_swapchain_format
                     && suitable_swapchain_present_mode)
             }
         };

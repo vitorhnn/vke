@@ -2,8 +2,9 @@ layout(push_constant, std430) uniform PushConstants {
     mat4 model;
     vec4 baseColor;
     uint albedoIndex;
-    uint metalicIndex;
+    uint metallicIndex;
     uint normalIndex;
+    uint padding;
 } constants;
 
 layout(set = 0, binding = 0) uniform UBO {
