@@ -206,7 +206,7 @@ pub fn load_scene(device: Rc<Device>, allocator: Rc<Allocator>, transfer: &mut T
     for material in scene.materials {
         let (idx, material) = load_material(device.clone(), &allocator, transfer, &material, current_idx);
         materials.push(material);
-        current_idx += idx;
+        current_idx = idx;
     }
 
     for model in scene.models {

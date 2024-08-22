@@ -14,6 +14,6 @@ void main() {
     vec3 normal = normalize(normal);
     vec3 lightDir = normalize(lightPos - worldSpacePos);
     float diffPower = max(dot(normal, lightDir), 0.0);
-    vec4 albedo = texture(sampler2D(textureHeap[constants.albedoIndex], stdSampler), uv);
-    outColor = diffPower * albedo;
+    vec3 albedo = texture(sampler2D(textureHeap[constants.albedoIndex], stdSampler), uv).rgb;
+    outColor = vec4(diffPower * albedo, 1.0);
 }

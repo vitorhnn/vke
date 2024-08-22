@@ -207,7 +207,7 @@ impl Transfer {
                         dst_access_mask: vk::AccessFlags::empty(),
                         src_queue_family_index: transfer_ctx.queue.family_index,
                         dst_queue_family_index: self.graphics_queue_ctx.queue.family_index,
-                        offset: start_of_data as u64,
+                        offset: 0,
                         size: len as u64,
                         ..Default::default()
                     });

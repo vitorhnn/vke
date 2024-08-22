@@ -675,7 +675,7 @@ impl GeometryPass {
 
                     let push_constants = PushConstant {
                         model: model.transform,
-                        base_color: glam::Vec4::new(0.0, 0.0, 0.0, 0.0),
+                        base_color: glam::Vec4::new(0.0, 0.0, 0.0, 1.0),
                         albedo_index,
                         metalic_index: 1,
                         normal_index: 1,
