@@ -46,27 +46,10 @@ impl VertexInputBindingDescription {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Format {
-    R32G32Sfloat,
-    R32G32B32Sfloat,
-    R32G32B32A32Sfloat,
-}
-
-impl Format {
-    fn as_vk(&self) -> vk::Format {
-        match self {
-            Format::R32G32Sfloat => vk::Format::R32G32_SFLOAT,
-            Format::R32G32B32Sfloat => vk::Format::R32G32B32_SFLOAT,
-            Format::R32G32B32A32Sfloat => vk::Format::R32G32B32A32_SFLOAT,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VertexInputAttributeDescription {
     pub location: u32,
     pub binding: u32,
-    pub format: Format,
+    pub format: crate::vk_types::Format,
     pub offset: u32,
 }
 

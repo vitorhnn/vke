@@ -46,6 +46,7 @@ mod technique;
 mod texture;
 mod texture_view;
 mod transfer;
+mod vk_types;
 
 use crate::device::ImageBarrierParameters;
 use crate::loader::World;
@@ -179,7 +180,7 @@ impl Application {
             })
             .collect::<Result<_, _>>()?;
 
-        let scene = asset::Scene::from_gltf(Path::new("./Sponza.glb"))?;
+        let scene = asset::Scene::from_gltf(Path::new("./Sponza2.glb"))?;
         let world = loader::load_scene(device.clone(), allocator.clone(), &mut transfer, scene);
 
         let geometry_pass = GeometryPass::new(device.clone(), allocator.clone(), desired_extent, &world);
@@ -563,7 +564,6 @@ fn result_msgbox<T, E: Debug>(result: Result<T, E>) -> Result<T, E> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    technique::compile_shader(Path::new("./glsl/geometry/"));
     let mut app = result_msgbox(Application::new(
         vk::Extent2D {
             width: 1280,

@@ -1,12 +1,11 @@
 use std::convert::TryInto;
 use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
-use gltf::image::{Format, Source};
 use gltf::mesh::util::{ReadIndices, ReadTexCoords};
 use gltf::mesh::Mode;
 use gltf::scene::Transform;
-use gltf::Semantic;
 use snafu::prelude::*;
 use ash::vk;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -26,7 +25,7 @@ pub enum Error {
     NoIndices,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Texture {
     pub info: crate::texture::TextureInfo,
     pub data: Vec<u8>,
@@ -48,13 +47,13 @@ impl Texture {
         let height = image.height();
         let decoded_bytes = image.into_rgba8().into_raw();
         let info = crate::texture::TextureInfo {
-            extent: vk::Extent3D {
+            extent: crate::vk_types::Extent3D {
                 depth: 1,
                 width, 
                 height,
             },
             // TODO: this is probably incorrect. check later if we have color problems
-            format: vk::Format::R8G8B8A8_UNORM,
+            format: crate::vk_types::Format::R8G8B8A8Unorm
         };
 
         Self {
@@ -64,7 +63,7 @@ impl Texture {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Mesh {
     pub indices: Vec<u16>,
     pub vertices: Vec<Vec3>,
@@ -74,13 +73,13 @@ pub struct Mesh {
     pub material_index: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Model {
     pub meshes: Vec<Mesh>,
     pub transform: Mat4,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Material {
     pub base_color_factor: Vec4,
     pub diffuse: Option<Texture>,
@@ -88,7 +87,7 @@ pub struct Material {
     pub metallic_roughness: Option<Texture>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Scene {
     pub models: Vec<Model>,
     pub materials: Vec<Material>

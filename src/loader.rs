@@ -12,74 +12,6 @@ use std::io::Read;
 use std::mem::size_of;
 use std::rc::Rc;
 
-/*pub fn load_png(
-    device: Rc<Device>,
-    source: &mut impl Read,
-    allocator: &Allocator,
-    transfer: &mut Transfer,
-) -> (TextureView, Allocation) {
-    let decoder = png::Decoder::new(source);
-    let mut reader = decoder.read_info().unwrap();
-
-    let (x, y) = reader.info().size();
-    let extent = vk::Extent3D {
-        depth: 1,
-        width: x,
-        height: y,
-    };
-
-    let (texture, allocation) = allocator
-        .create_texture(
-            &vk::ImageCreateInfo::builder()
-                .flags(vk::ImageCreateFlags::empty())
-                .image_type(vk::ImageType::TYPE_2D)
-                .format(vk::Format::R8G8B8A8_SRGB)
-                .extent(extent)
-                .mip_levels(1)
-                .array_layers(1)
-                .samples(vk::SampleCountFlags::TYPE_1)
-                .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
-                .initial_layout(vk::ImageLayout::UNDEFINED)
-                .sharing_mode(vk::SharingMode::EXCLUSIVE),
-            MemoryUsage::DeviceOnly,
-        )
-        .unwrap();
-
-    let image = texture.image.clone();
-    let view = TextureView::new(
-        device,
-        texture,
-        &vk::ImageViewCreateInfo::builder()
-            .view_type(vk::ImageViewType::TYPE_2D)
-            .format(vk::Format::R8G8B8A8_SRGB)
-            .components(vk::ComponentMapping::default())
-            .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
-                base_mip_level: 0,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: 1,
-            })
-            .image(image),
-    )
-    .unwrap();
-
-    transfer
-        .upload_image_callback(
-            |buf| {
-                let read_info = reader.next_frame(buf).unwrap();
-
-                read_info.buffer_size()
-            },
-            &view.texture,
-        )
-        .unwrap();
-
-    transfer.flush().unwrap();
-
-    (view, allocation)
-}*/
-
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 struct PosUvNormalTangentVertex {
@@ -116,6 +48,8 @@ pub struct Model {
 
 pub struct Material {
     pub albedo: Option<(u32, TextureView)>,
+    pub metallic: Option<(u32, TextureView)>,
+    pub normal: Option<(u32, TextureView)>,
 }
 
 // this couples rendering code and data with world management and logic.
@@ -132,8 +66,8 @@ fn load_texture(device: Rc<Device>, allocator: &Allocator, transfer: &mut Transf
             &vk::ImageCreateInfo::builder()
                 .flags(vk::ImageCreateFlags::empty())
                 .image_type(vk::ImageType::TYPE_2D)
-                .format(texture_asset.info.format)
-                .extent(texture_asset.info.extent)
+                .format(texture_asset.info.format.as_vk())
+                .extent(texture_asset.info.extent.as_vk())
                 .mip_levels(1)
                 .array_layers(1)
                 .samples(vk::SampleCountFlags::TYPE_1)
@@ -155,7 +89,7 @@ fn load_texture(device: Rc<Device>, allocator: &Allocator, transfer: &mut Transf
             .view_type(vk::ImageViewType::TYPE_2D)
             // TODO: Check this. There's probably a good reason as to why you can specify different formats
             // for the image and image view
-            .format(texture_asset.info.format)
+            .format(texture_asset.info.format.as_vk())
             .components(vk::ComponentMapping::default())
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -179,23 +113,24 @@ fn load_texture(device: Rc<Device>, allocator: &Allocator, transfer: &mut Transf
 
 fn load_material(device: Rc<Device>, allocator: &Allocator, transfer: &mut Transfer, material: &asset::Material, mut current_idx: u32) -> (u32, Material) {
     let albedo = material.diffuse.as_ref().map(|diffuse| {
+        let index = current_idx;
         current_idx += 1;
-        load_texture(device.clone(), allocator, transfer, &diffuse)
+        (index, load_texture(device.clone(), allocator, transfer, &diffuse))
     });
 
-    /*
-    if let Some(metallic_roughness) = &material.metallic_roughness {
-        views.push(load_texture(device.clone(), allocator, transfer, metallic_roughness));
+    let metallic = material.metallic_roughness.as_ref().map(|metallic_roughness| {
+        let index = current_idx;
         current_idx += 1;
-    }
+        (index, load_texture(device.clone(), allocator, transfer, &metallic_roughness))
+    });
 
-    if let Some(normal) = &material.normal {
-        views.push(load_texture(device.clone(), allocator, transfer, normal));
+    let normal = material.normal.as_ref().map(|normal| {
+        let index = current_idx;
         current_idx += 1;
-    }
-    */
+        (index, load_texture(device.clone(), allocator, transfer, &normal))
+    });
 
-    (current_idx, Material { albedo: albedo.map(|x| (current_idx, x)) })
+    (current_idx, Material { albedo, metallic, normal })
 }
 
 pub fn load_scene(device: Rc<Device>, allocator: Rc<Allocator>, transfer: &mut Transfer, scene: Scene) -> World {

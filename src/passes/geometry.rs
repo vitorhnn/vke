@@ -212,7 +212,7 @@ struct PushConstant {
     model: glam::Mat4,
     base_color: glam::Vec4,
     albedo_index: u32,
-    metalic_index: u32,
+    metallic_index: u32,
     normal_index: u32,
     padding: u32,
 }
@@ -432,9 +432,25 @@ impl GeometryPass {
         for material in &world.materials {
             image_infos.push(vk::DescriptorImageInfo {
                 image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                image_view: material.albedo.as_ref().unwrap().1.inner,
+                image_view: material.albedo.as_ref().map_or(vk::ImageView::null(), |x| x.1.inner),
                 sampler: vk::Sampler::null(),
             });
+
+            if let Some(metallic) = material.metallic.as_ref() {
+                image_infos.push(vk::DescriptorImageInfo {
+                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    image_view: metallic.1.inner,
+                    sampler: vk::Sampler::null(),
+                });
+            }
+
+            if let Some(normal) = material.normal.as_ref() {
+                image_infos.push(vk::DescriptorImageInfo {
+                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    image_view: normal.1.inner,
+                    sampler: vk::Sampler::null(),
+                });
+            }
         }
 
         let sampler_img_info = vk::DescriptorImageInfo {
@@ -458,7 +474,7 @@ impl GeometryPass {
                 dst_array_element: 0,
                 descriptor_type: vk::DescriptorType::SAMPLED_IMAGE,
                 p_image_info: image_infos.as_ptr(),
-                descriptor_count: world.materials.len() as u32,
+                descriptor_count: image_infos.len() as u32,
                 ..Default::default()
             }
         ];
@@ -671,14 +687,17 @@ impl GeometryPass {
                         vk::IndexType::UINT16,
                     );
 
-                    let albedo_index = world.materials[(mesh.material_idx as usize) - 1].albedo.as_ref().unwrap().0;
+                    let albedo_index = world.materials[(mesh.material_idx as usize) - 1].albedo.as_ref().map_or(999, |x| x.0);
+                    let metallic_index = world.materials[(mesh.material_idx as usize) - 1].metallic.as_ref().map_or(999, |x| x.0);
+                    let normal_index = world.materials[(mesh.material_idx as usize) - 1].normal.as_ref().map_or(999, |x| x.0);
+
 
                     let push_constants = PushConstant {
                         model: model.transform,
                         base_color: glam::Vec4::new(0.0, 0.0, 0.0, 1.0),
                         albedo_index,
-                        metalic_index: 1,
-                        normal_index: 1,
+                        metallic_index,
+                        normal_index,
                         padding: 0
                     };
 

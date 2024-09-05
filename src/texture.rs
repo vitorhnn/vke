@@ -4,11 +4,12 @@ use ash::prelude::VkResult;
 use ash::vk;
 use gpu_allocator::vulkan::Allocation;
 use std::rc::Rc;
+use serde::{Serialize, Deserialize};
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TextureInfo {
-    pub extent: vk::Extent3D,
-    pub format: vk::Format,
+    pub extent: crate::vk_types::Extent3D,
+    pub format: crate::vk_types::Format,
 }
 
 #[derive(Debug)]
