@@ -83,12 +83,6 @@ struct Application {
     relative_mouse: bool,
 }
 
-#[repr(C)]
-#[derive(Debug, Clone, Default)]
-pub struct PerFrameDataUbo {
-    view: Mat4,
-    projection: Mat4,
-}
 
 const SHADER_MAIN_FN_NAME: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"main\0") };
 
@@ -180,7 +174,7 @@ impl Application {
             })
             .collect::<Result<_, _>>()?;
 
-        let scene = asset::Scene::from_gltf(Path::new("./Sponza2.glb"))?;
+        let scene = asset::Scene::from_gltf(Path::new("./Sponza.glb"))?;
         let world = loader::load_scene(device.clone(), allocator.clone(), &mut transfer, scene);
 
         let geometry_pass = GeometryPass::new(device.clone(), allocator.clone(), desired_extent, &world);
@@ -253,18 +247,6 @@ impl Application {
         Ok(())
     }
 
-    fn update_ubo(&self) -> PerFrameDataUbo {
-        let mut ubo = PerFrameDataUbo::default();
-
-        let view = self.fly_camera.get_matrix();
-        ubo.view = view;
-
-        let aspect_ratio = self.swapchain.extent.width as f32 / self.swapchain.extent.height as f32;
-        ubo.projection = Mat4::perspective_infinite_rh(f32::to_radians(45.0), aspect_ratio, 0.1);
-
-        ubo
-    }
-
     fn draw(&mut self) -> VkResult<()> {
         let frame_resources = &self.frame_resources[self.current_frame];
         let wait_fences = [frame_resources.fence];
@@ -323,11 +305,11 @@ impl Application {
                 .begin_command_buffer(command_buffer, &vk::CommandBufferBeginInfo::builder())?;
         }
 
-        let frame_ubo = self.update_ubo();
-
         unsafe {
+            let aspect_ratio = self.swapchain.extent.width as f32 / self.swapchain.extent.height as f32;
+
             self.geometry_pass
-                .execute(self.current_frame, &command_buffer, &self.world, frame_ubo).unwrap();
+                .execute(self.current_frame, &command_buffer, &self.world, &self.fly_camera, aspect_ratio).unwrap();
 
             self.device.insert_image_barrier(&ImageBarrierParameters {
                 command_buffer,
@@ -569,7 +551,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             width: 1280,
             height: 720,
         },
-        vk::PresentModeKHR::IMMEDIATE,
+        vk::PresentModeKHR::FIFO,
     ))?;
 
     match result_msgbox(app.run()) {

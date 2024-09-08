@@ -4,18 +4,18 @@ use crate::loader::World;
 use crate::per_frame::PerFrame;
 use crate::technique::{CookedGraphicsTechnique, DescriptorSetLayout, Technique};
 use crate::texture_view::TextureView;
-use crate::PerFrameDataUbo;
 use crate::{buffer, technique, Device, FRAMES_IN_FLIGHT, SHADER_MAIN_FN_NAME};
 use crate::technique::PushConstantRange;
 use ash::prelude::VkResult;
 use ash::vk;
-use glam::Mat4;
+use glam::{Mat4, Vec3};
 use gpu_allocator::vulkan::Allocation;
 use std::error::Error;
 use std::rc::Rc;
 use std::path::Path;
 use std::default::Default;
 use ash::vk::DescriptorPoolCreateFlags;
+use crate::fly_camera::FlyCamera;
 use crate::sampler::Sampler;
 
 pub struct GeometryPass {
@@ -34,6 +34,14 @@ pub struct GeometryPass {
     render_resolution: vk::Extent2D,
     heap_set: vk::DescriptorSet,
     linear_sampler: Sampler,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Default)]
+pub struct PerFrameDataUbo {
+    view: Mat4,
+    projection: Mat4,
+    cam_pos: Vec3,
 }
 
 fn create_graphics_pipeline(
@@ -210,6 +218,7 @@ fn create_graphics_pipeline(
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct PushConstant {
     model: glam::Mat4,
+    inv_model: glam::Mat4,
     base_color: glam::Vec4,
     albedo_index: u32,
     metallic_index: u32,
@@ -479,7 +488,7 @@ impl GeometryPass {
             }
         ];
 
-    unsafe { device.inner.update_descriptor_sets(&writes, &[]); }
+        unsafe { device.inner.update_descriptor_sets(&writes, &[]); }
 
         descriptor_set
     }
@@ -487,7 +496,8 @@ impl GeometryPass {
     pub fn prepare_frame_wide_descriptor_set(
         &self,
         frame_idx: usize,
-        ubo_data: PerFrameDataUbo,
+        camera: &FlyCamera,
+        aspect_ratio: f32,
     ) -> VkResult<vk::DescriptorSet> {
         let mapped = self
             .allocator
@@ -496,8 +506,9 @@ impl GeometryPass {
         let slice = unsafe { std::slice::from_raw_parts_mut(mapped, FRAMES_IN_FLIGHT) };
         let ubo = &mut slice[frame_idx];
 
-        ubo.view = ubo_data.view;
-        ubo.projection = ubo_data.projection;
+        ubo.view = camera.get_matrix();
+        ubo.projection = Mat4::perspective_infinite_rh(f32::to_radians(45.0), aspect_ratio, 0.1);
+        ubo.cam_pos = camera.position;
 
         self.allocator.unmap(&self.ubo_allocation);
 
@@ -546,7 +557,8 @@ impl GeometryPass {
         frame_idx: usize,
         command_buffer: &vk::CommandBuffer,
         world: &World,
-        ubo: PerFrameDataUbo,
+        camera: &FlyCamera,
+        aspect_ratio: f32,
     ) -> VkResult<()> {
         let color_target = self.color_target_views.get_resource_for_frame(frame_idx);
         let depth_target = self.depth_target_views.get_resource_for_frame(frame_idx);
@@ -648,7 +660,7 @@ impl GeometryPass {
                 self.pipeline,
             );
 
-            let frame_descriptor_set = self.prepare_frame_wide_descriptor_set(frame_idx, ubo)?;
+            let frame_descriptor_set = self.prepare_frame_wide_descriptor_set(frame_idx, camera, aspect_ratio)?;
 
             self.device.inner.cmd_bind_descriptor_sets(
                 *command_buffer,
@@ -694,6 +706,7 @@ impl GeometryPass {
 
                     let push_constants = PushConstant {
                         model: model.transform,
+                        inv_model: model.transform.inverse().transpose(),
                         base_color: glam::Vec4::new(0.0, 0.0, 0.0, 1.0),
                         albedo_index,
                         metallic_index,

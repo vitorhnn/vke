@@ -3,7 +3,7 @@ use glam::{Mat4, Vec3};
 use std::mem::replace;
 
 pub struct FlyCamera {
-    position: Vec3,
+    pub (crate) position: Vec3,
     front: Vec3,
     up: Vec3,
     right: Vec3,
