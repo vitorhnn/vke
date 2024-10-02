@@ -3,7 +3,7 @@ use ash::vk;
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
 use shaderc;
-use shaderc::{ResolvedInclude, ShaderKind};
+use shaderc::{OptimizationLevel, ResolvedInclude, ShaderKind};
 use spirv_cross::spirv::{Decoration, Resource, ShaderResources, Type};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
@@ -425,6 +425,7 @@ pub fn compile_shader(dir: &Path) -> Technique {
             resolved_name: resolved_path.to_str().unwrap().to_owned(),
         })
     });
+    compile_options.set_optimization_level(OptimizationLevel::Performance);
 
     match metadata.r#type {
         TechniqueMetadataType::Graphics(GraphicsTechnique {
