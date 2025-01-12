@@ -80,9 +80,13 @@ impl Swapchain {
             .surface(surface.surface)
             .min_image_count(pick_desired_image_count(&support_info.capabilities))
             .image_color_space(vk::ColorSpaceKHR::SRGB_NONLINEAR)
-            .image_format(vk::Format::B8G8R8A8_SRGB)
+            .image_format(vk::Format::B8G8R8A8_UNORM)
             .image_extent(extent)
-            .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST)
+            .image_usage(
+                vk::ImageUsageFlags::COLOR_ATTACHMENT
+                    | vk::ImageUsageFlags::TRANSFER_DST
+                    | vk::ImageUsageFlags::STORAGE,
+            )
             .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
             .pre_transform(support_info.capabilities.current_transform)
             .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
@@ -99,7 +103,7 @@ impl Swapchain {
             .map(|&image| {
                 let create_view_info = vk::ImageViewCreateInfo::builder()
                     .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(vk::Format::B8G8R8A8_SRGB)
+                    .format(vk::Format::B8G8R8A8_UNORM)
                     .components(vk::ComponentMapping {
                         r: vk::ComponentSwizzle::IDENTITY,
                         g: vk::ComponentSwizzle::IDENTITY,

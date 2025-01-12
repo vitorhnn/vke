@@ -1,22 +1,22 @@
 use crate::allocator::{Allocator, MemoryUsage};
 use crate::device::ImageBarrierParameters;
+use crate::fly_camera::FlyCamera;
 use crate::loader::World;
 use crate::per_frame::PerFrame;
+use crate::sampler::Sampler;
+use crate::technique::PushConstantRange;
 use crate::technique::{CookedGraphicsTechnique, DescriptorSetLayout, Technique};
 use crate::texture_view::TextureView;
 use crate::{buffer, technique, Device, FRAMES_IN_FLIGHT, SHADER_MAIN_FN_NAME};
-use crate::technique::PushConstantRange;
 use ash::prelude::VkResult;
 use ash::vk;
+use ash::vk::DescriptorPoolCreateFlags;
 use glam::{Mat4, Vec3};
 use gpu_allocator::vulkan::Allocation;
-use std::error::Error;
-use std::rc::Rc;
-use std::path::Path;
 use std::default::Default;
-use ash::vk::DescriptorPoolCreateFlags;
-use crate::fly_camera::FlyCamera;
-use crate::sampler::Sampler;
+use std::error::Error;
+use std::path::Path;
+use std::rc::Rc;
 
 pub struct GeometryPass {
     device: Rc<Device>,
@@ -166,7 +166,7 @@ fn create_graphics_pipeline(
     };
 
     let mut pipeline_rendering_info = vk::PipelineRenderingCreateInfoKHR::builder()
-        .color_attachment_formats(&[vk::Format::B8G8R8A8_SRGB])
+        .color_attachment_formats(&[vk::Format::R16G16B16A16_SFLOAT])
         .depth_attachment_format(vk::Format::D32_SFLOAT)
         .stencil_attachment_format(vk::Format::UNDEFINED);
 
@@ -255,13 +255,13 @@ impl GeometryPass {
             let pool_sizes = [
                 vk::DescriptorPoolSize {
                     // worst case sizing, all mtls with 3 images
-                    descriptor_count: 4096,//(world.materials.len() * 3) as u32,
+                    descriptor_count: 4096, //(world.materials.len() * 3) as u32,
                     ty: vk::DescriptorType::SAMPLED_IMAGE,
                 },
                 vk::DescriptorPoolSize {
                     descriptor_count: 4,
                     ty: vk::DescriptorType::SAMPLER,
-                }
+                },
             ];
 
             let pool_create_info = vk::DescriptorPoolCreateInfo::builder()
@@ -297,13 +297,17 @@ impl GeometryPass {
 
             let image_info = vk::ImageCreateInfo::builder()
                 .image_type(vk::ImageType::TYPE_2D)
-                .format(vk::Format::B8G8R8A8_SRGB)
+                .format(vk::Format::R16G16B16A16_SFLOAT)
                 .extent(extent)
                 .mip_levels(1)
                 .array_layers(1)
                 .samples(vk::SampleCountFlags::TYPE_1)
                 .tiling(vk::ImageTiling::OPTIMAL)
-                .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC);
+                .usage(
+                    vk::ImageUsageFlags::COLOR_ATTACHMENT
+                        | vk::ImageUsageFlags::STORAGE
+                        | vk::ImageUsageFlags::TRANSFER_SRC,
+                );
 
             let (mut texture, allocation) = allocator
                 .create_texture(&image_info, MemoryUsage::DeviceOnly)
@@ -313,7 +317,7 @@ impl GeometryPass {
 
             let create_view_info = vk::ImageViewCreateInfo::builder()
                 .view_type(vk::ImageViewType::TYPE_2D)
-                .format(vk::Format::B8G8R8A8_SRGB)
+                .format(vk::Format::R16G16B16A16_SFLOAT)
                 .components(vk::ComponentMapping {
                     r: vk::ComponentSwizzle::IDENTITY,
                     g: vk::ComponentSwizzle::IDENTITY,
@@ -394,16 +398,25 @@ impl GeometryPass {
         )
         .expect("failed to create graphics pipeline");
 
-        let linear_sampler = Sampler::new(device.clone(), vk::SamplerCreateInfo::builder()
-            .mag_filter(vk::Filter::LINEAR)
-            .min_filter(vk::Filter::LINEAR)
-            .address_mode_u(vk::SamplerAddressMode::REPEAT)
-            .address_mode_v(vk::SamplerAddressMode::REPEAT)
-            .address_mode_w(vk::SamplerAddressMode::REPEAT)
-            .build()
-        ).unwrap();
+        let linear_sampler = Sampler::new(
+            device.clone(),
+            vk::SamplerCreateInfo::builder()
+                .mag_filter(vk::Filter::LINEAR)
+                .min_filter(vk::Filter::LINEAR)
+                .address_mode_u(vk::SamplerAddressMode::REPEAT)
+                .address_mode_v(vk::SamplerAddressMode::REPEAT)
+                .address_mode_w(vk::SamplerAddressMode::REPEAT)
+                .build(),
+        )
+        .unwrap();
 
-        let heap_set = GeometryPass::prepare_material_descriptor_set(&device, &linear_sampler, &descriptor_set_layouts, heap_pool, world);
+        let heap_set = GeometryPass::prepare_material_descriptor_set(
+            &device,
+            &linear_sampler,
+            &descriptor_set_layouts,
+            heap_pool,
+            world,
+        );
 
         let pass = Self {
             device,
@@ -426,7 +439,13 @@ impl GeometryPass {
         pass
     }
 
-    fn prepare_material_descriptor_set(device: &Device, linear_sampler: &Sampler, set_layouts: &[vk::DescriptorSetLayout], heap_pool: vk::DescriptorPool, world: &World) -> vk::DescriptorSet {
+    fn prepare_material_descriptor_set(
+        device: &Device,
+        linear_sampler: &Sampler,
+        set_layouts: &[vk::DescriptorSetLayout],
+        heap_pool: vk::DescriptorPool,
+        world: &World,
+    ) -> vk::DescriptorSet {
         let set_layout = &set_layouts[1];
         let allocate_info = vk::DescriptorSetAllocateInfo {
             descriptor_pool: heap_pool,
@@ -435,13 +454,17 @@ impl GeometryPass {
             ..Default::default()
         };
 
-        let descriptor_set = unsafe { device.inner.allocate_descriptor_sets(&allocate_info) }.unwrap()[0];
+        let descriptor_set =
+            unsafe { device.inner.allocate_descriptor_sets(&allocate_info) }.unwrap()[0];
 
         let mut image_infos = Vec::with_capacity(world.materials.len());
         for material in &world.materials {
             image_infos.push(vk::DescriptorImageInfo {
                 image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                image_view: material.albedo.as_ref().map_or(vk::ImageView::null(), |x| x.1.inner),
+                image_view: material
+                    .albedo
+                    .as_ref()
+                    .map_or(vk::ImageView::null(), |x| x.1.inner),
                 sampler: vk::Sampler::null(),
             });
 
@@ -485,10 +508,12 @@ impl GeometryPass {
                 p_image_info: image_infos.as_ptr(),
                 descriptor_count: image_infos.len() as u32,
                 ..Default::default()
-            }
+            },
         ];
 
-        unsafe { device.inner.update_descriptor_sets(&writes, &[]); }
+        unsafe {
+            device.inner.update_descriptor_sets(&writes, &[]);
+        }
 
         descriptor_set
     }
@@ -660,7 +685,8 @@ impl GeometryPass {
                 self.pipeline,
             );
 
-            let frame_descriptor_set = self.prepare_frame_wide_descriptor_set(frame_idx, camera, aspect_ratio)?;
+            let frame_descriptor_set =
+                self.prepare_frame_wide_descriptor_set(frame_idx, camera, aspect_ratio)?;
 
             self.device.inner.cmd_bind_descriptor_sets(
                 *command_buffer,
@@ -677,7 +703,7 @@ impl GeometryPass {
                 self.pipeline_layout,
                 1,
                 std::slice::from_ref(&self.heap_set),
-                 &[],
+                &[],
             );
 
             for model in &world.models {
@@ -699,10 +725,18 @@ impl GeometryPass {
                         vk::IndexType::UINT16,
                     );
 
-                    let albedo_index = world.materials[(mesh.material_idx as usize) - 1].albedo.as_ref().map_or(999, |x| x.0);
-                    let metallic_index = world.materials[(mesh.material_idx as usize) - 1].metallic.as_ref().map_or(999, |x| x.0);
-                    let normal_index = world.materials[(mesh.material_idx as usize) - 1].normal.as_ref().map_or(999, |x| x.0);
-
+                    let albedo_index = world.materials[(mesh.material_idx as usize) - 1]
+                        .albedo
+                        .as_ref()
+                        .map_or(999, |x| x.0);
+                    let metallic_index = world.materials[(mesh.material_idx as usize) - 1]
+                        .metallic
+                        .as_ref()
+                        .map_or(999, |x| x.0);
+                    let normal_index = world.materials[(mesh.material_idx as usize) - 1]
+                        .normal
+                        .as_ref()
+                        .map_or(999, |x| x.0);
 
                     let push_constants = PushConstant {
                         model: model.transform,
@@ -711,7 +745,7 @@ impl GeometryPass {
                         albedo_index,
                         metallic_index,
                         normal_index,
-                        padding: 0
+                        padding: 0,
                     };
 
                     let ptr = bytemuck::bytes_of(&push_constants);

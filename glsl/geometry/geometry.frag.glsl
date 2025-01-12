@@ -43,7 +43,7 @@ vec3 fresnelSchlick(float cosTheta, vec3 f0) {
     return f0 + (1.0 - f0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
-const vec3 lightColor = vec3(1.0);
+const vec3 lightColor = vec3(100.0);
 
 void main() {
     vec3 normal = constants.normalIndex != 999 ?

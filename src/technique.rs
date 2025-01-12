@@ -76,6 +76,7 @@ pub enum DescriptorType {
     Sampler,
     SampledImage,
     StorageBuffer,
+    StorageImage,
 }
 
 impl DescriptorType {
@@ -85,6 +86,7 @@ impl DescriptorType {
             Self::Sampler => vk::DescriptorType::SAMPLER,
             Self::SampledImage => vk::DescriptorType::SAMPLED_IMAGE,
             Self::StorageBuffer => vk::DescriptorType::STORAGE_BUFFER,
+            Self::StorageImage => vk::DescriptorType::STORAGE_IMAGE,
         }
     }
 }
@@ -300,8 +302,14 @@ fn build_descriptor_set_layouts_for_descriptor_type(
             .unwrap();
 
         let descriptor_count = match ast.get_type(resource.type_id).unwrap() {
-            Type::Image { array, .. } => array[0],
-            _ => 1
+            Type::Image { array, .. } => {
+                if array.len() > 0 {
+                    array[0]
+                } else {
+                    1
+                }
+            }
+            _ => 1,
         };
 
         let set = &mut sets[set_index as usize].get_or_insert_with(|| DescriptorSetLayout {
@@ -382,6 +390,14 @@ fn build_descriptor_set_layouts_for_stage(
         &resources.storage_buffers,
         DescriptorType::StorageBuffer,
     );
+    build_descriptor_set_layouts_for_descriptor_type(
+        sets,
+        sets_metadata,
+        stage,
+        ast,
+        &resources.storage_images,
+        DescriptorType::StorageImage,
+    )
 }
 
 fn parse_push_constant_for_stage(

@@ -27,5 +27,5 @@ ron = "0.8.0"
 image = { version = "0.25.1", features = ["png"] }
 bytemuck = { version = "1", features = ["derive"] }
 
-#[profile.dev]
-#opt-level=1
+[profile.dev]
+opt-level=1

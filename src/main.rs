@@ -51,6 +51,7 @@ mod vk_types;
 use crate::device::ImageBarrierParameters;
 use crate::loader::World;
 use crate::passes::geometry::GeometryPass;
+use crate::passes::tonemap::TonemapPass;
 use crate::texture::Texture;
 use transfer::Transfer;
 
@@ -72,6 +73,7 @@ struct Application {
     device: Rc<Device>,
     surface: surface::Surface,
     geometry_pass: GeometryPass,
+    tonemap_pass: TonemapPass,
     transfer: Transfer,
     frame_resources: Vec<FrameResources>,
     current_frame: usize,
@@ -82,7 +84,6 @@ struct Application {
     fly_camera: fly_camera::FlyCamera,
     relative_mouse: bool,
 }
-
 
 const SHADER_MAIN_FN_NAME: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"main\0") };
 
@@ -177,7 +178,14 @@ impl Application {
         let scene = asset::Scene::from_gltf(Path::new("./Sponza.glb"))?;
         let world = loader::load_scene(device.clone(), allocator.clone(), &mut transfer, scene);
 
-        let geometry_pass = GeometryPass::new(device.clone(), allocator.clone(), desired_extent, &world);
+        let geometry_pass =
+            GeometryPass::new(device.clone(), allocator.clone(), desired_extent, &world);
+
+        let tonemap_pass = TonemapPass::new(
+            device.clone(),
+            geometry_pass.color_target_views,
+            swapchain.image_resources,
+        );
 
         println!("VKe: application created");
         println!(
@@ -208,6 +216,7 @@ impl Application {
             input_state: input::InputState::new(),
             fly_camera: fly_camera::FlyCamera::new(),
             geometry_pass,
+            tonemap_pass,
             relative_mouse: false,
         };
 
@@ -306,19 +315,27 @@ impl Application {
         }
 
         unsafe {
-            let aspect_ratio = self.swapchain.extent.width as f32 / self.swapchain.extent.height as f32;
+            let aspect_ratio =
+                self.swapchain.extent.width as f32 / self.swapchain.extent.height as f32;
 
             self.geometry_pass
-                .execute(self.current_frame, &command_buffer, &self.world, &self.fly_camera, aspect_ratio).unwrap();
+                .execute(
+                    self.current_frame,
+                    &command_buffer,
+                    &self.world,
+                    &self.fly_camera,
+                    aspect_ratio,
+                )
+                .unwrap();
 
             self.device.insert_image_barrier(&ImageBarrierParameters {
                 command_buffer,
                 src_stage_mask: vk::PipelineStageFlags::TOP_OF_PIPE,
-                dst_stage_mask: vk::PipelineStageFlags::TRANSFER,
+                dst_stage_mask: vk::PipelineStageFlags::COMPUTE_SHADER,
                 old_layout: vk::ImageLayout::UNDEFINED,
-                new_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                new_layout: vk::ImageLayout::GENERAL,
                 src_access_mask: vk::AccessFlags::empty(),
-                dst_access_mask: vk::AccessFlags::TRANSFER_WRITE,
+                dst_access_mask: vk::AccessFlags::SHADER_WRITE,
                 image: image_resources.image,
                 subresource_range: vk::ImageSubresourceRange::builder()
                     .aspect_mask(vk::ImageAspectFlags::COLOR)
@@ -334,15 +351,15 @@ impl Application {
                 .color_target_views
                 .get_resource_for_frame(self.current_frame);
 
-            // transition render images to transfer src
+            // transition render images to compute read
             self.device.insert_image_barrier(&ImageBarrierParameters {
                 command_buffer,
                 src_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                dst_stage_mask: vk::PipelineStageFlags::TRANSFER,
+                dst_stage_mask: vk::PipelineStageFlags::COMPUTE_SHADER,
                 old_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                new_layout: vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                new_layout: vk::ImageLayout::GENERAL,
                 src_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-                dst_access_mask: vk::AccessFlags::TRANSFER_READ,
+                dst_access_mask: vk::AccessFlags::SHADER_READ,
                 image: geometry_color_output.texture.image,
                 subresource_range: vk::ImageSubresourceRange::builder()
                     .aspect_mask(vk::ImageAspectFlags::COLOR)
@@ -353,6 +370,7 @@ impl Application {
                     .build(),
             });
 
+            /*
             let region = vk::ImageBlit {
                 src_subresource: vk::ImageSubresourceLayers {
                     layer_count: 1,
@@ -393,14 +411,21 @@ impl Application {
                 std::slice::from_ref(&region),
                 vk::Filter::LINEAR,
             );
+            */
+
+            self.tonemap_pass.execute(
+                command_buffer,
+                geometry_color_output,
+                image_resources.image_view,
+            )?;
 
             self.device.insert_image_barrier(&ImageBarrierParameters {
                 command_buffer,
-                src_stage_mask: vk::PipelineStageFlags::TRANSFER,
+                src_stage_mask: vk::PipelineStageFlags::COMPUTE_SHADER,
                 dst_stage_mask: vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-                old_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                old_layout: vk::ImageLayout::GENERAL,
                 new_layout: vk::ImageLayout::PRESENT_SRC_KHR,
-                src_access_mask: vk::AccessFlags::TRANSFER_WRITE,
+                src_access_mask: vk::AccessFlags::SHADER_WRITE,
                 dst_access_mask: vk::AccessFlags::empty(),
                 image: image_resources.image,
                 subresource_range: vk::ImageSubresourceRange::builder()
