@@ -90,11 +90,7 @@ fn create_compute_pipeline(
 }
 
 impl TonemapPass {
-    pub fn new(
-        device: Rc<Device>,
-        in_textures: PerFrame<&TextureView>,
-        out_views: PerFrame<vk::ImageView>,
-    ) -> Self {
+    pub fn new(device: Rc<Device>, in_textures: &PerFrame<TextureView>) -> Self {
         let technique = technique::compile_shader(Path::new("./glsl/tonemap"));
         let compute_technique = if let TechniqueType::Compute(compute_technique) = &technique.r#type
         {
@@ -113,13 +109,13 @@ impl TonemapPass {
 
         let descriptor_pool = {
             let pool_size = vk::DescriptorPoolSize {
-                descriptor_count: 2,
+                descriptor_count: 2 * FRAMES_IN_FLIGHT as u32,
                 ty: vk::DescriptorType::STORAGE_IMAGE,
             };
 
             let pool_create_info = vk::DescriptorPoolCreateInfo::builder()
                 .pool_sizes(std::slice::from_ref(&pool_size))
-                .max_sets(3);
+                .max_sets(FRAMES_IN_FLIGHT as u32);
 
             unsafe { device.inner.create_descriptor_pool(&pool_create_info, None) }
                 .expect("failed to create descriptor pool for tonemap")
@@ -130,7 +126,6 @@ impl TonemapPass {
             descriptor_pool,
             descriptor_set_layouts[0],
             in_textures,
-            out_views,
         );
 
         Self {
@@ -147,8 +142,7 @@ impl TonemapPass {
         device: &Device,
         descriptor_pool: vk::DescriptorPool,
         descriptor_set_layout: vk::DescriptorSetLayout,
-        in_textures: PerFrame<&TextureView>,
-        out_views: PerFrame<vk::ImageView>,
+        in_textures: &PerFrame<TextureView>,
     ) -> PerFrame<vk::DescriptorSet> {
         let layouts: [vk::DescriptorSetLayout; FRAMES_IN_FLIGHT] =
             [descriptor_set_layout; FRAMES_IN_FLIGHT];
@@ -161,50 +155,57 @@ impl TonemapPass {
         };
         let descriptor_sets = unsafe { device.inner.allocate_descriptor_sets(&allocate_info) }
             .expect("tonemap descriptor set allocation failed");
+        let images: [_; FRAMES_IN_FLIGHT] = core::array::from_fn(|i| vk::DescriptorImageInfo {
+            image_layout: vk::ImageLayout::GENERAL,
+            image_view: in_textures.get_resource_for_frame(i).inner,
+            sampler: vk::Sampler::null(),
+        });
 
-        let writes: [vk::WriteDescriptorSet; FRAMES_IN_FLIGHT] = core::array::from_fn(|i| {
-            let image_infos = [
-                vk::DescriptorImageInfo {
-                    image_layout: vk::ImageLayout::GENERAL,
-                    image_view: in_textures.get_resource_for_frame(i).inner,
-                    sampler: vk::Sampler::null(),
-                },
-                vk::DescriptorImageInfo {
-                    image_layout: vk::ImageLayout::GENERAL,
-                    image_view: *out_views.get_resource_for_frame(i),
-                    sampler: vk::Sampler::null(),
-                },
-            ];
-
-            vk::WriteDescriptorSet {
+        let writes: [vk::WriteDescriptorSet; FRAMES_IN_FLIGHT] =
+            core::array::from_fn(|i| vk::WriteDescriptorSet {
                 dst_set: descriptor_sets[i],
                 dst_binding: 0,
                 dst_array_element: 0,
                 descriptor_type: vk::DescriptorType::STORAGE_IMAGE,
-                p_image_info: image_infos.as_ptr(),
-                descriptor_count: image_infos.len() as u32,
+                p_image_info: &images[i],
+                descriptor_count: 1,
                 ..Default::default()
-            }
-        });
+            });
 
         unsafe {
             device.inner.update_descriptor_sets(&writes, &[]);
         }
 
-        todo!()
+        PerFrame::new_from_vec(descriptor_sets)
     }
 
-    pub fn execute(&mut self, frame_idx: usize, command_buffer: vk::CommandBuffer) -> VkResult<()> {
-        unsafe {
-            self.device.inner.reset_descriptor_pool(
-                self.descriptor_pool,
-                vk::DescriptorPoolResetFlags::empty(),
-            )?
-        }
-
+    pub fn execute(
+        &mut self,
+        frame_idx: usize,
+        command_buffer: vk::CommandBuffer,
+        target_view: vk::ImageView,
+    ) -> VkResult<()> {
         let descriptor_set = self.descriptor_sets.get_resource_for_frame(frame_idx);
 
         unsafe {
+            let image_info = vk::DescriptorImageInfo {
+                image_layout: vk::ImageLayout::GENERAL,
+                image_view: target_view,
+                sampler: vk::Sampler::null(),
+            };
+
+            let write = vk::WriteDescriptorSet {
+                dst_set: *descriptor_set,
+                dst_binding: 1,
+                dst_array_element: 0,
+                descriptor_type: vk::DescriptorType::STORAGE_IMAGE,
+                p_image_info: &image_info,
+                descriptor_count: 1,
+                ..Default::default()
+            };
+
+            self.device.inner.update_descriptor_sets(&[write], &[]);
+
             self.device.inner.cmd_bind_pipeline(
                 command_buffer,
                 vk::PipelineBindPoint::COMPUTE,

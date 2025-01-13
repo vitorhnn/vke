@@ -181,11 +181,7 @@ impl Application {
         let geometry_pass =
             GeometryPass::new(device.clone(), allocator.clone(), desired_extent, &world);
 
-        let tonemap_pass = TonemapPass::new(
-            device.clone(),
-            geometry_pass.color_target_views,
-            swapchain.image_resources,
-        );
+        let tonemap_pass = TonemapPass::new(device.clone(), &geometry_pass.color_target_views);
 
         println!("VKe: application created");
         println!(
@@ -370,52 +366,9 @@ impl Application {
                     .build(),
             });
 
-            /*
-            let region = vk::ImageBlit {
-                src_subresource: vk::ImageSubresourceLayers {
-                    layer_count: 1,
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_array_layer: 0,
-                    mip_level: 0,
-                },
-                src_offsets: [
-                    vk::Offset3D { x: 0, y: 0, z: 0 },
-                    vk::Offset3D {
-                        x: self.desired_extent.width as i32,
-                        y: self.desired_extent.height as i32,
-                        z: 1,
-                    },
-                ],
-                dst_subresource: vk::ImageSubresourceLayers {
-                    layer_count: 1,
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_array_layer: 0,
-                    mip_level: 0,
-                },
-                dst_offsets: [
-                    vk::Offset3D { x: 0, y: 0, z: 0 },
-                    vk::Offset3D {
-                        x: self.desired_extent.width as i32,
-                        y: self.desired_extent.height as i32,
-                        z: 1,
-                    },
-                ],
-            };
-
-            self.device.inner.cmd_blit_image(
-                command_buffer,
-                geometry_color_output.texture.image,
-                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                image_resources.image,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                std::slice::from_ref(&region),
-                vk::Filter::LINEAR,
-            );
-            */
-
             self.tonemap_pass.execute(
+                self.current_frame,
                 command_buffer,
-                geometry_color_output,
                 image_resources.image_view,
             )?;
 
