@@ -12,8 +12,8 @@ use crate::device::{Device, RawDevice};
 use crate::instance::Instance;
 
 use crate::Texture;
-use gpu_allocator::vulkan::*;
 use gpu_allocator::vulkan::AllocationScheme::{DedicatedBuffer, DedicatedImage};
+use gpu_allocator::vulkan::*;
 
 enum MapInfo {
     Persistent(*mut c_void),
@@ -60,7 +60,7 @@ impl Allocator {
             device: device.inner.inner.clone(),
             physical_device: device.physical_device,
             instance: instance.inner.clone(),
-            buffer_device_address: false,
+            buffer_device_address: true,
             debug_settings: Default::default(),
             allocation_sizes: Default::default(),
         })

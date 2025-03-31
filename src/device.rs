@@ -3,8 +3,15 @@ use std::fmt::{Debug, Formatter};
 use std::ops::Deref;
 use std::rc::Rc;
 
-use ash::extensions::khr::{CreateRenderPass2, DynamicRendering, TimelineSemaphore};
-use ash::vk::{ExtDescriptorIndexingFn, KhrDepthStencilResolveFn, Semaphore, SemaphoreCreateInfo, SemaphoreType, SemaphoreTypeCreateInfo};
+use ash::extensions::khr::{
+    AccelerationStructure, BufferDeviceAddress, CreateRenderPass2, DynamicRendering,
+    TimelineSemaphore,
+};
+use ash::vk::{
+    ExtDescriptorIndexingFn, KhrAccelerationStructureFn, KhrBufferDeviceAddressFn,
+    KhrDeferredHostOperationsFn, KhrDepthStencilResolveFn, Semaphore, SemaphoreCreateInfo,
+    SemaphoreType, SemaphoreTypeCreateInfo,
+};
 use ash::{extensions::khr::Swapchain as KhrSwapchain, prelude::VkResult, vk, Device as VkDevice};
 
 use crate::instance::Instance;
@@ -57,6 +64,8 @@ pub struct Device {
     pub inner: Rc<RawDevice>,
     pub timeline_semaphore: TimelineSemaphore,
     pub dynamic_rendering: DynamicRendering,
+    pub acceleration_structure: AccelerationStructure,
+    pub bda: BufferDeviceAddress,
     pub physical_device: vk::PhysicalDevice,
     pub graphics_queue: Rc<Queue>,
     pub transfer_queue: Rc<Queue>,
@@ -110,6 +119,11 @@ impl Device {
             vk::PhysicalDeviceTimelineSemaphoreFeaturesKHR::builder().timeline_semaphore(true);
         let mut dynamic_rendering_features =
             vk::PhysicalDeviceDynamicRenderingFeaturesKHR::builder().dynamic_rendering(true);
+        let mut acceleration_structure_features =
+            vk::PhysicalDeviceAccelerationStructureFeaturesKHR::builder()
+                .acceleration_structure(true);
+        let mut bda_features =
+            vk::PhysicalDeviceBufferDeviceAddressFeatures::builder().buffer_device_address(true);
         let device_features_builder = vk::PhysicalDeviceFeatures::builder();
 
         let device_extensions = [
@@ -119,16 +133,20 @@ impl Device {
             CreateRenderPass2::name().as_ptr(),
             KhrDepthStencilResolveFn::name().as_ptr(),
             ExtDescriptorIndexingFn::name().as_ptr(),
+            KhrAccelerationStructureFn::name().as_ptr(),
+            KhrBufferDeviceAddressFn::name().as_ptr(),
+            KhrDeferredHostOperationsFn::name().as_ptr(),
         ];
 
         let create_device_info_builder = vk::DeviceCreateInfo::builder()
             .queue_create_infos(&queues)
             // this is *technically* wrong, device layers != instance layers
-            .enabled_layer_names(&instance.layers)
             .enabled_extension_names(&device_extensions)
             .enabled_features(&device_features_builder)
             .push_next(&mut timeline_semaphores_features)
-            .push_next(&mut dynamic_rendering_features);
+            .push_next(&mut dynamic_rendering_features)
+            .push_next(&mut acceleration_structure_features)
+            .push_next(&mut bda_features);
 
         let raw_device = Rc::new(RawDevice {
             inner: unsafe {
@@ -158,6 +176,8 @@ impl Device {
 
         let timeline_semaphore = TimelineSemaphore::new(&instance.inner, &raw_device);
         let dynamic_rendering = DynamicRendering::new(&instance.inner, &raw_device);
+        let acceleration_structure = AccelerationStructure::new(&instance.inner, &raw_device);
+        let bda = BufferDeviceAddress::new(&instance.inner, &raw_device);
 
         Ok(Self {
             inner: raw_device,
@@ -165,7 +185,9 @@ impl Device {
             graphics_queue,
             timeline_semaphore,
             dynamic_rendering,
+            acceleration_structure,
             transfer_queue,
+            bda,
         })
     }
 
@@ -191,8 +213,7 @@ impl Device {
                     .into_iter()
                     .any(|present_mode| present_mode == desired_present_mode);
 
-                Ok(suitable_swapchain_format
-                    && suitable_swapchain_present_mode)
+                Ok(suitable_swapchain_format && suitable_swapchain_present_mode)
             }
         };
 

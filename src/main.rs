@@ -1,6 +1,5 @@
 // rust devs pls stabilize
 #![feature(try_find)]
-#![feature(maybe_uninit_uninit_array)]
 #![feature(maybe_uninit_array_assume_init)]
 
 use ash::{prelude::VkResult, vk};
@@ -41,6 +40,7 @@ mod input;
 mod loader;
 mod passes;
 mod per_frame;
+mod raytracing;
 mod sampler;
 mod technique;
 mod texture;
@@ -52,6 +52,7 @@ use crate::device::ImageBarrierParameters;
 use crate::loader::World;
 use crate::passes::geometry::GeometryPass;
 use crate::passes::tonemap::TonemapPass;
+use crate::raytracing::RaytracingSupport;
 use crate::texture::Texture;
 use transfer::Transfer;
 
@@ -75,6 +76,7 @@ struct Application {
     geometry_pass: GeometryPass,
     tonemap_pass: TonemapPass,
     transfer: Transfer,
+    rt_support: RaytracingSupport,
     frame_resources: Vec<FrameResources>,
     current_frame: usize,
     frame_count: usize,
@@ -134,7 +136,7 @@ impl Application {
             desired_present_mode,
         )?;
 
-        let mut frame_resources: Vec<FrameResources> = (0..FRAMES_IN_FLIGHT)
+        let frame_resources: Vec<FrameResources> = (0..FRAMES_IN_FLIGHT)
             .map::<VkResult<FrameResources>, _>(|_| {
                 let semaphore_create_info = vk::SemaphoreCreateInfo::builder();
 
@@ -183,6 +185,8 @@ impl Application {
 
         let tonemap_pass = TonemapPass::new(device.clone(), &geometry_pass.color_target_views);
 
+        let rt_support = RaytracingSupport::new(device.clone(), &allocator, &world);
+
         println!("VKe: application created");
         println!(
             "graphics queue family index: {:#?}",
@@ -213,6 +217,7 @@ impl Application {
             fly_camera: fly_camera::FlyCamera::new(),
             geometry_pass,
             tonemap_pass,
+            rt_support,
             relative_mouse: false,
         };
 

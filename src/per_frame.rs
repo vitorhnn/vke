@@ -9,7 +9,7 @@ pub struct PerFrame<T> {
 
 impl<T: Sized + Debug> PerFrame<T> {
     pub fn new<F: FnMut() -> T>(mut f: F) -> Self {
-        let mut resources: [MaybeUninit<T>; FRAMES_IN_FLIGHT] = MaybeUninit::uninit_array();
+        let mut resources = [const { MaybeUninit::uninit() }; FRAMES_IN_FLIGHT];
 
         for elem in &mut resources {
             elem.write(f());

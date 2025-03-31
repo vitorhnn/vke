@@ -14,7 +14,7 @@ use std::rc::Rc;
 
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
-struct PosUvNormalTangentVertex {
+pub struct PosUvNormalTangentVertex {
     pos: Vec3,
     uv: Vec2,
     normal: Vec3,
@@ -29,6 +29,7 @@ pub struct Mesh {
     pub allocator: Rc<Allocator>,
     pub idx_count: u32,
     pub material_idx: u32,
+    pub vertex_count: u32,
 }
 
 impl Drop for Mesh {
@@ -60,7 +61,12 @@ pub struct World {
     pub materials: Vec<Material>,
 }
 
-fn load_texture(device: Rc<Device>, allocator: &Allocator, transfer: &mut Transfer, texture_asset: &Texture) -> TextureView {
+fn load_texture(
+    device: Rc<Device>,
+    allocator: &Allocator,
+    transfer: &mut Transfer,
+    texture_asset: &Texture,
+) -> TextureView {
     let (mut texture, allocation) = allocator
         .create_texture(
             &vk::ImageCreateInfo::builder()
@@ -96,50 +102,88 @@ fn load_texture(device: Rc<Device>, allocator: &Allocator, transfer: &mut Transf
                 base_mip_level: 0,
                 level_count: 1,
                 base_array_layer: 0,
-                layer_count: 1
+                layer_count: 1,
             })
-            .image(image)
-    ).expect("failed to create image view");
+            .image(image),
+    )
+    .expect("failed to create image view");
 
     let len = texture_asset.data.len();
-    transfer.upload_image_callback(len, |buf| {
-        buf[..len].copy_from_slice(&texture_asset.data);
+    transfer
+        .upload_image_callback(
+            len,
+            |buf| {
+                buf[..len].copy_from_slice(&texture_asset.data);
 
-        len
-    }, &view.texture).expect("upload failed");
+                len
+            },
+            &view.texture,
+        )
+        .expect("upload failed");
 
     view
 }
 
-fn load_material(device: Rc<Device>, allocator: &Allocator, transfer: &mut Transfer, material: &asset::Material, mut current_idx: u32) -> (u32, Material) {
+fn load_material(
+    device: Rc<Device>,
+    allocator: &Allocator,
+    transfer: &mut Transfer,
+    material: &asset::Material,
+    mut current_idx: u32,
+) -> (u32, Material) {
     let albedo = material.diffuse.as_ref().map(|diffuse| {
         let index = current_idx;
         current_idx += 1;
-        (index, load_texture(device.clone(), allocator, transfer, &diffuse))
+        (
+            index,
+            load_texture(device.clone(), allocator, transfer, &diffuse),
+        )
     });
 
-    let metallic = material.metallic_roughness.as_ref().map(|metallic_roughness| {
-        let index = current_idx;
-        current_idx += 1;
-        (index, load_texture(device.clone(), allocator, transfer, &metallic_roughness))
-    });
+    let metallic = material
+        .metallic_roughness
+        .as_ref()
+        .map(|metallic_roughness| {
+            let index = current_idx;
+            current_idx += 1;
+            (
+                index,
+                load_texture(device.clone(), allocator, transfer, &metallic_roughness),
+            )
+        });
 
     let normal = material.normal.as_ref().map(|normal| {
         let index = current_idx;
         current_idx += 1;
-        (index, load_texture(device.clone(), allocator, transfer, &normal))
+        (
+            index,
+            load_texture(device.clone(), allocator, transfer, &normal),
+        )
     });
 
-    (current_idx, Material { albedo, metallic, normal })
+    (
+        current_idx,
+        Material {
+            albedo,
+            metallic,
+            normal,
+        },
+    )
 }
 
-pub fn load_scene(device: Rc<Device>, allocator: Rc<Allocator>, transfer: &mut Transfer, scene: Scene) -> World {
+pub fn load_scene(
+    device: Rc<Device>,
+    allocator: Rc<Allocator>,
+    transfer: &mut Transfer,
+    scene: Scene,
+) -> World {
     let mut models = Vec::new();
     let mut materials = Vec::new();
     let mut current_idx = 0;
 
     for material in scene.materials {
-        let (idx, material) = load_material(device.clone(), &allocator, transfer, &material, current_idx);
+        let (idx, material) =
+            load_material(device.clone(), &allocator, transfer, &material, current_idx);
         materials.push(material);
         current_idx = idx;
     }
@@ -155,7 +199,8 @@ pub fn load_scene(device: Rc<Device>, allocator: Rc<Allocator>, transfer: &mut T
                         .size(buf_size)
                         .usage(
                             vk::BufferUsageFlags::TRANSFER_DST
-                                | vk::BufferUsageFlags::VERTEX_BUFFER,
+                                | vk::BufferUsageFlags::VERTEX_BUFFER
+                                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
                         )
                         .sharing_mode(vk::SharingMode::EXCLUSIVE),
                     MemoryUsage::DeviceOnly,
@@ -167,12 +212,9 @@ pub fn load_scene(device: Rc<Device>, allocator: Rc<Allocator>, transfer: &mut T
                     buf_size as usize,
                     |buf| {
                         let mut used = 0;
-                        for (pos, uv, normal, tangent) in izip!(
-                            &mesh.vertices,
-                            &mesh.uvs,
-                            &mesh.normals,
-                            &mesh.tangents,
-                        ) {
+                        for (pos, uv, normal, tangent) in
+                            izip!(&mesh.vertices, &mesh.uvs, &mesh.normals, &mesh.tangents,)
+                        {
                             let vtx = PosUvNormalTangentVertex {
                                 pos: *pos,
                                 uv: *uv,
@@ -196,14 +238,18 @@ pub fn load_scene(device: Rc<Device>, allocator: Rc<Allocator>, transfer: &mut T
                     &vk::BufferCreateInfo::builder()
                         .size((size_of::<u16>() * mesh.indices.len()) as u64)
                         .usage(
-                            vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::INDEX_BUFFER,
+                            vk::BufferUsageFlags::TRANSFER_DST
+                                | vk::BufferUsageFlags::INDEX_BUFFER
+                                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
                         )
                         .sharing_mode(vk::SharingMode::EXCLUSIVE),
                     MemoryUsage::DeviceOnly,
                 )
                 .unwrap();
 
-            transfer.upload_buffer(bytemuck::cast_slice(&mesh.indices), &idx_buf).unwrap();
+            transfer
+                .upload_buffer(bytemuck::cast_slice(&mesh.indices), &idx_buf)
+                .unwrap();
 
             meshes.push(Mesh {
                 allocation: Some(allocation),
@@ -213,6 +259,7 @@ pub fn load_scene(device: Rc<Device>, allocator: Rc<Allocator>, transfer: &mut T
                 idx_count: mesh.indices.len() as u32,
                 allocator: allocator.clone(),
                 material_idx: mesh.material_index,
+                vertex_count: mesh.vertices.len() as u32,
             })
         }
 
