@@ -3,7 +3,7 @@
 layout (local_size_x = 8, local_size_y = 8) in;
 
 layout (set = 0, binding = 0, rgba16f) readonly uniform image2D inImage;
-layout (set = 0, binding = 1, rgba8) writeonly uniform image2D outImage;
+layout (set = 0, binding = 1) writeonly uniform image2D outImage;
 
 void main() {
     ivec2 inputSize = imageSize(inImage);

@@ -8,7 +8,7 @@ edition = "2018"
 
 [dependencies]
 ash = "0.37"
-sdl2 = "0.36"
+sdl2 = "0.38"
 memoffset = "0.9"
 glam = { version = "0.28", features = ["bytemuck", "serde"] }
 png = "0.17"

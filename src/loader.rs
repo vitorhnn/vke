@@ -200,7 +200,8 @@ pub fn load_scene(
                         .usage(
                             vk::BufferUsageFlags::TRANSFER_DST
                                 | vk::BufferUsageFlags::VERTEX_BUFFER
-                                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                                | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
                         )
                         .sharing_mode(vk::SharingMode::EXCLUSIVE),
                     MemoryUsage::DeviceOnly,
@@ -240,7 +241,8 @@ pub fn load_scene(
                         .usage(
                             vk::BufferUsageFlags::TRANSFER_DST
                                 | vk::BufferUsageFlags::INDEX_BUFFER
-                                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                                | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
                         )
                         .sharing_mode(vk::SharingMode::EXCLUSIVE),
                     MemoryUsage::DeviceOnly,

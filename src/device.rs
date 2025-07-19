@@ -124,7 +124,8 @@ impl Device {
                 .acceleration_structure(true);
         let mut bda_features =
             vk::PhysicalDeviceBufferDeviceAddressFeatures::builder().buffer_device_address(true);
-        let device_features_builder = vk::PhysicalDeviceFeatures::builder();
+        let device_features_builder =
+            vk::PhysicalDeviceFeatures::builder().shader_storage_image_write_without_format(true);
 
         let device_extensions = [
             KhrSwapchain::name().as_ptr(),

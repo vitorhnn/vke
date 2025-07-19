@@ -180,13 +180,14 @@ impl Application {
         let scene = asset::Scene::from_gltf(Path::new("./Sponza.glb"))?;
         let world = loader::load_scene(device.clone(), allocator.clone(), &mut transfer, scene);
 
-        let geometry_pass =
-            GeometryPass::new(device.clone(), allocator.clone(), desired_extent, &world);
-
-        let tonemap_pass = TonemapPass::new(device.clone(), &geometry_pass.color_target_views);
+        // meme solution to wait for geometry upload
+        unsafe { device.inner.device_wait_idle() };
 
         let rt_support = RaytracingSupport::new(device.clone(), &allocator, &world);
 
+        let geometry_pass =
+            GeometryPass::new(device.clone(), allocator.clone(), desired_extent, &world);
+        let tonemap_pass = TonemapPass::new(device.clone(), &geometry_pass.color_target_views);
         println!("VKe: application created");
         println!(
             "graphics queue family index: {:#?}",

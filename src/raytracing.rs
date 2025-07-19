@@ -12,8 +12,14 @@ pub struct RaytracingSupport {
     as_allocations: Vec<Allocation>,
 }
 
-fn addressify(bda: vk::DeviceAddress) -> vk::DeviceOrHostAddressConstKHR {
+fn addressify_const(bda: vk::DeviceAddress) -> vk::DeviceOrHostAddressConstKHR {
     vk::DeviceOrHostAddressConstKHR {
+        device_address: bda,
+    }
+}
+
+fn addressify(bda: vk::DeviceAddress) -> vk::DeviceOrHostAddressKHR {
+    vk::DeviceOrHostAddressKHR {
         device_address: bda,
     }
 }
@@ -23,6 +29,17 @@ impl RaytracingSupport {
         let vtx_size = std::mem::size_of::<crate::loader::PosUvNormalTangentVertex>() as u64;
         let mut as_bufs = Vec::new();
         let mut as_allocations = Vec::new();
+        let cmd_buf = unsafe {
+            device
+                .inner
+                .allocate_command_buffers(
+                    &vk::CommandBufferAllocateInfo::builder()
+                        .command_pool(device.graphics_queue.command_pool)
+                        .level(vk::CommandBufferLevel::PRIMARY)
+                        .command_buffer_count(1),
+                )
+                .expect("rt cmd buf allocate fail")[0]
+        };
         for model in &world.models {
             // Vulkan "please triple sign this" bs
             let mut geometries = Vec::with_capacity(model.meshes.len());
@@ -44,8 +61,8 @@ impl RaytracingSupport {
 
                 let geometry_data = vk::AccelerationStructureGeometryDataKHR {
                     triangles: vk::AccelerationStructureGeometryTrianglesDataKHR::builder()
-                        .vertex_data(addressify(geometry_vertex_address))
-                        .index_data(addressify(geometry_index_address))
+                        .vertex_data(addressify_const(geometry_vertex_address))
+                        .index_data(addressify_const(geometry_index_address))
                         .vertex_format(vk::Format::R32G32B32_SFLOAT)
                         .vertex_stride(vtx_size)
                         .max_vertex(
@@ -123,7 +140,7 @@ impl RaytracingSupport {
             let device_address = unsafe {
                 device
                     .acceleration_structure
-                    .get_acceleration_structure_device_address(&acceleration_device_address_info);
+                    .get_acceleration_structure_device_address(&acceleration_device_address_info)
             };
 
             let scratch_buf_create_info = vk::BufferCreateInfo::builder()
@@ -131,7 +148,7 @@ impl RaytracingSupport {
                     vk::BufferUsageFlags::STORAGE_BUFFER
                         | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
                 )
-                .size(sizes.acceleration_structure_size)
+                .size(sizes.build_scratch_size)
                 .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
             let (scratch_buf, scratch_alloc) = allocator
@@ -143,6 +160,46 @@ impl RaytracingSupport {
                     &vk::BufferDeviceAddressInfo::builder().buffer(scratch_buf.inner),
                 )
             };
+
+            let build_geometry_info = build_geometry_info
+                .dst_acceleration_structure(acceleration_structure)
+                .scratch_data(addressify(scratch_buf_addr));
+
+            unsafe {
+                device
+                    .inner
+                    .begin_command_buffer(
+                        cmd_buf,
+                        &vk::CommandBufferBeginInfo::builder()
+                            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                    )
+                    .expect("failed to begin rt as build cmd buf");
+
+                device
+                    .acceleration_structure
+                    .cmd_build_acceleration_structures(
+                        cmd_buf,
+                        &[*build_geometry_info],
+                        &[&geometry_ranges],
+                    );
+
+                device
+                    .inner
+                    .end_command_buffer(cmd_buf)
+                    .expect("failed to end rt as build cmd buf");
+
+                let cmd_bufs = [cmd_buf];
+                let submit = vk::SubmitInfo::builder().command_buffers(&cmd_bufs);
+
+                device
+                    .inner
+                    .queue_submit(device.graphics_queue.inner, &[*submit], vk::Fence::null())
+                    .expect("rt as build queue submit failed");
+                device
+                    .inner
+                    .queue_wait_idle(device.graphics_queue.inner)
+                    .expect("as queue wait idle failed");
+            }
         }
 
         Self {
