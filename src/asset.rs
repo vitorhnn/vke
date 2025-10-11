@@ -1,11 +1,11 @@
-use std::convert::TryInto;
+use ash::vk;
 use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
 use gltf::mesh::util::{ReadIndices, ReadTexCoords};
 use gltf::mesh::Mode;
 use gltf::scene::Transform;
-use snafu::prelude::*;
-use ash::vk;
 use serde::{Deserialize, Serialize};
+use snafu::prelude::*;
+use std::convert::TryInto;
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -40,7 +40,7 @@ impl Texture {
                 let end = start + view.length();
                 &buffers[view.buffer().index()][start..end]
             }
-            _ => todo!()
+            _ => todo!(),
         };
         let image = image::load_from_memory(bytes).unwrap();
         let width = image.width();
@@ -49,16 +49,16 @@ impl Texture {
         let info = crate::texture::TextureInfo {
             extent: crate::vk_types::Extent3D {
                 depth: 1,
-                width, 
+                width,
                 height,
             },
             // TODO: this is probably incorrect. check later if we have color problems
-            format: crate::vk_types::Format::R8G8B8A8Unorm
+            format: crate::vk_types::Format::R8G8B8A8Unorm,
         };
 
         Self {
             data: decoded_bytes,
-            info
+            info,
         }
     }
 }
@@ -90,7 +90,7 @@ pub struct Material {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Scene {
     pub models: Vec<Model>,
-    pub materials: Vec<Material>
+    pub materials: Vec<Material>,
 }
 
 impl Scene {
@@ -101,15 +101,25 @@ impl Scene {
         // so we load our own images.
         let gltf = gltf::Gltf::open(path).context(ImportSnafu)?;
         let document = &gltf.document;
-        let buffers = gltf::import_buffers(document, path.parent(), gltf.blob).context(ImportSnafu)?;
+        let buffers =
+            gltf::import_buffers(document, path.parent(), gltf.blob).context(ImportSnafu)?;
 
         let mut materials = Vec::new();
 
         for material in document.materials() {
-            let base_color_factor: Vec4 = material.pbr_metallic_roughness().base_color_factor().into();
-            let diffuse = material.pbr_metallic_roughness().base_color_texture().map(|image| Texture::from_gltf(&image.texture(), &buffers));
-            let metallic_roughness = material.pbr_metallic_roughness().metallic_roughness_texture().map(|image| Texture::from_gltf(&image.texture(), &buffers));
-            let normal = material.normal_texture().map(|image| Texture::from_gltf(&image.texture(), &buffers));
+            let base_color_factor: Vec4 =
+                material.pbr_metallic_roughness().base_color_factor().into();
+            let diffuse = material
+                .pbr_metallic_roughness()
+                .base_color_texture()
+                .map(|image| Texture::from_gltf(&image.texture(), &buffers));
+            let metallic_roughness = material
+                .pbr_metallic_roughness()
+                .metallic_roughness_texture()
+                .map(|image| Texture::from_gltf(&image.texture(), &buffers));
+            let normal = material
+                .normal_texture()
+                .map(|image| Texture::from_gltf(&image.texture(), &buffers));
             materials.push(Material {
                 base_color_factor,
                 diffuse,
@@ -185,7 +195,12 @@ impl Scene {
                     };
 
                     // idx 0 is used for the default material
-                    let material_index = primitive.material().index().map_or(0, |idx| idx + 1).try_into().expect("material index overflow");
+                    let material_index = primitive
+                        .material()
+                        .index()
+                        .map_or(0, |idx| idx + 1)
+                        .try_into()
+                        .expect("material index overflow");
 
                     model.meshes.push(Mesh {
                         vertices,

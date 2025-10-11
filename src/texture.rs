@@ -3,8 +3,8 @@ use crate::{Device, Transfer};
 use ash::prelude::VkResult;
 use ash::vk;
 use gpu_allocator::vulkan::Allocation;
+use serde::{Deserialize, Serialize};
 use std::rc::Rc;
-use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TextureInfo {

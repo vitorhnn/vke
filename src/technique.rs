@@ -442,6 +442,10 @@ pub fn compile_shader(dir: &Path) -> Technique {
         })
     });
     compile_options.set_optimization_level(OptimizationLevel::Performance);
+    compile_options.set_target_env(
+        shaderc::TargetEnv::Vulkan,
+        shaderc::EnvVersion::Vulkan1_2 as u32,
+    );
 
     match metadata.r#type {
         TechniqueMetadataType::Graphics(GraphicsTechnique {

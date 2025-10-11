@@ -124,6 +124,8 @@ impl Device {
                 .acceleration_structure(true);
         let mut bda_features =
             vk::PhysicalDeviceBufferDeviceAddressFeatures::builder().buffer_device_address(true);
+        let mut ray_query_features =
+            vk::PhysicalDeviceRayQueryFeaturesKHR::builder().ray_query(true);
         let device_features_builder =
             vk::PhysicalDeviceFeatures::builder().shader_storage_image_write_without_format(true);
 
@@ -147,7 +149,8 @@ impl Device {
             .push_next(&mut timeline_semaphores_features)
             .push_next(&mut dynamic_rendering_features)
             .push_next(&mut acceleration_structure_features)
-            .push_next(&mut bda_features);
+            .push_next(&mut bda_features)
+            .push_next(&mut ray_query_features);
 
         let raw_device = Rc::new(RawDevice {
             inner: unsafe {

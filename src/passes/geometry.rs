@@ -232,6 +232,7 @@ impl GeometryPass {
         allocator: Rc<Allocator>,
         render_resolution: vk::Extent2D,
         world: &World,
+        tlas: vk::AccelerationStructureKHR,
     ) -> Self {
         let descriptor_pools = PerFrame::new(|| {
             let pool_sizes = [vk::DescriptorPoolSize {
@@ -416,6 +417,7 @@ impl GeometryPass {
             &descriptor_set_layouts,
             heap_pool,
             world,
+            tlas,
         );
 
         let pass = Self {
@@ -445,6 +447,7 @@ impl GeometryPass {
         set_layouts: &[vk::DescriptorSetLayout],
         heap_pool: vk::DescriptorPool,
         world: &World,
+        tlas: vk::AccelerationStructureKHR,
     ) -> vk::DescriptorSet {
         let set_layout = &set_layouts[1];
         let allocate_info = vk::DescriptorSetAllocateInfo {
@@ -490,6 +493,12 @@ impl GeometryPass {
             ..Default::default()
         };
 
+        let tlas_write = vk::WriteDescriptorSetAccelerationStructureKHR {
+            acceleration_structure_count: 1,
+            p_acceleration_structures: std::ptr::from_ref(&tlas),
+            ..Default::default()
+        };
+
         let writes = [
             vk::WriteDescriptorSet {
                 dst_set: descriptor_set,
@@ -503,6 +512,15 @@ impl GeometryPass {
             vk::WriteDescriptorSet {
                 dst_set: descriptor_set,
                 dst_binding: 1,
+                dst_array_element: 0,
+                descriptor_type: vk::DescriptorType::ACCELERATION_STRUCTURE_KHR,
+                descriptor_count: 1,
+                p_next: std::ptr::from_ref(&tlas_write) as *const std::ffi::c_void,
+                ..Default::default()
+            },
+            vk::WriteDescriptorSet {
+                dst_set: descriptor_set,
+                dst_binding: 2,
                 dst_array_element: 0,
                 descriptor_type: vk::DescriptorType::SAMPLED_IMAGE,
                 p_image_info: image_infos.as_ptr(),

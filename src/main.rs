@@ -185,8 +185,13 @@ impl Application {
 
         let rt_support = RaytracingSupport::new(device.clone(), &allocator, &world);
 
-        let geometry_pass =
-            GeometryPass::new(device.clone(), allocator.clone(), desired_extent, &world);
+        let geometry_pass = GeometryPass::new(
+            device.clone(),
+            allocator.clone(),
+            desired_extent,
+            &world,
+            rt_support.tlas_handle,
+        );
         let tonemap_pass = TonemapPass::new(device.clone(), &geometry_pass.color_target_views);
         println!("VKe: application created");
         println!(

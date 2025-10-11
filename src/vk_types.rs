@@ -44,7 +44,7 @@ impl Format {
             vk::Format::R32G32B32A32_SFLOAT => Format::R32G32B32A32Sfloat,
 
             vk::Format::R8G8B8A8_UNORM => Format::R8G8B8A8Unorm,
-            _ => todo!()
+            _ => todo!(),
         }
     }
     pub fn as_vk(&self) -> vk::Format {

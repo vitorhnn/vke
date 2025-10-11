@@ -190,7 +190,12 @@ impl Transfer {
         }
     }
 
-    pub fn upload_buffer_callback<F>(&mut self, len: usize, callback: F, dest: &Buffer) -> VkResult<()>
+    pub fn upload_buffer_callback<F>(
+        &mut self,
+        len: usize,
+        callback: F,
+        dest: &Buffer,
+    ) -> VkResult<()>
     where
         F: FnOnce(&mut [u8]) -> usize,
     {
@@ -255,7 +260,12 @@ impl Transfer {
         )
     }
 
-    pub fn upload_image_callback<F>(&mut self, len: usize, callback: F, dest: &Texture) -> VkResult<()>
+    pub fn upload_image_callback<F>(
+        &mut self,
+        len: usize,
+        callback: F,
+        dest: &Texture,
+    ) -> VkResult<()>
     where
         F: FnOnce(&mut [u8]) -> usize,
     {
