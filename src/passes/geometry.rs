@@ -263,6 +263,10 @@ impl GeometryPass {
                     descriptor_count: 4,
                     ty: vk::DescriptorType::SAMPLER,
                 },
+                vk::DescriptorPoolSize {
+                    descriptor_count: 4,
+                    ty: vk::DescriptorType::ACCELERATION_STRUCTURE_KHR,
+                },
             ];
 
             let pool_create_info = vk::DescriptorPoolCreateInfo::builder()
@@ -550,7 +554,7 @@ impl GeometryPass {
         let ubo = &mut slice[frame_idx];
 
         ubo.view = camera.get_matrix();
-        ubo.projection = Mat4::perspective_infinite_rh(f32::to_radians(45.0), aspect_ratio, 0.1);
+        ubo.projection = Mat4::perspective_infinite_rh(f32::to_radians(60.0), aspect_ratio, 0.1);
         ubo.cam_pos = camera.position;
 
         self.allocator.unmap(&self.ubo_allocation);

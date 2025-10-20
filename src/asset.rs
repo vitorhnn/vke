@@ -29,11 +29,11 @@ pub enum Error {
 pub struct Texture {
     pub info: crate::texture::TextureInfo,
     pub data: Vec<u8>,
+    pub is_srgb: bool,
 }
 
 impl Texture {
-    fn from_gltf(tex: &gltf::Texture, buffers: &Vec<gltf::buffer::Data>) -> Self {
-        use image::DynamicImage;
+    fn from_gltf(tex: &gltf::Texture, buffers: &Vec<gltf::buffer::Data>, is_srgb: bool) -> Self {
         let bytes = match tex.source().source() {
             gltf::image::Source::View { view, .. } => {
                 let start = view.offset();
@@ -52,13 +52,13 @@ impl Texture {
                 width,
                 height,
             },
-            // TODO: this is probably incorrect. check later if we have color problems
             format: crate::vk_types::Format::R8G8B8A8Unorm,
         };
 
         Self {
             data: decoded_bytes,
             info,
+            is_srgb,
         }
     }
 }
@@ -112,14 +112,14 @@ impl Scene {
             let diffuse = material
                 .pbr_metallic_roughness()
                 .base_color_texture()
-                .map(|image| Texture::from_gltf(&image.texture(), &buffers));
+                .map(|image| Texture::from_gltf(&image.texture(), &buffers, true));
             let metallic_roughness = material
                 .pbr_metallic_roughness()
                 .metallic_roughness_texture()
-                .map(|image| Texture::from_gltf(&image.texture(), &buffers));
+                .map(|image| Texture::from_gltf(&image.texture(), &buffers, false));
             let normal = material
                 .normal_texture()
-                .map(|image| Texture::from_gltf(&image.texture(), &buffers));
+                .map(|image| Texture::from_gltf(&image.texture(), &buffers, false));
             materials.push(Material {
                 base_color_factor,
                 diffuse,
@@ -228,10 +228,5 @@ mod tests {
     #[test]
     fn test_sponza() {
         Scene::from_gltf(Path::new(&"./Sponza.glb"));
-    }
-
-    #[test]
-    fn test_bistro() {
-        Scene::from_gltf(Path::new(&"/tmp/Bistro_Godot.glb"));
     }
 }

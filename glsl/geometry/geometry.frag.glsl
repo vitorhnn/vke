@@ -1,10 +1,11 @@
-#version 450
+#version 460
 #include "descriptor_sets.inc.glsl"
 
 layout(location = 0) in vec2 uv;
-layout(location = 1) in vec3 tangentLightPos;
-layout(location = 2) in vec3 tangentCamPos;
-layout(location = 3) in vec3 tangentPos;
+layout(location = 1) in vec3 worldSpacePos;
+layout(location = 2) in vec3 tangentLightDir;
+layout(location = 3) in vec3 tangentViewDir;
+layout(location = 4) in float lightDistance;
 
 layout(location = 0) out vec4 outColor;
 
@@ -43,11 +44,24 @@ vec3 fresnelSchlick(float cosTheta, vec3 f0) {
     return f0 + (1.0 - f0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
-const vec3 lightColor = vec3(100.0);
+const vec3 lightColor = vec3(1000.0);
+
+bool trace_shadow_rays(vec3 lightOrigin, vec3 pos) {
+    const vec3 dir = lightOrigin - pos;
+    const float tmin = 0.01, tmax = length(dir);
+    rayQueryEXT query;
+
+    rayQueryInitializeEXT(query, tlas, gl_RayFlagsTerminateOnFirstHitEXT, 0xFF, pos, tmin, dir, tmax);
+    rayQueryProceedEXT(query);
+
+    if (rayQueryGetIntersectionTypeEXT(query, true) != gl_RayQueryCommittedIntersectionNoneEXT)
+        return true;
+    return false;
+}
 
 void main() {
     vec3 normal = constants.normalIndex != 999 ?
-        texture(sampler2D(textureHeap[constants.normalIndex], stdSampler), uv).rgb : vec3(0.0);
+        texture(sampler2D(textureHeap[constants.normalIndex], stdSampler), uv).rgb : vec3(0.5, 0.5, 1.0);
     vec3 metallicRoughness = constants.metallicIndex != 999 ?
             texture(sampler2D(textureHeap[constants.metallicIndex], stdSampler), uv).rgb : vec3(0.0);
     vec3 albedo = texture(sampler2D(textureHeap[constants.albedoIndex], stdSampler), uv).rgb;
@@ -56,10 +70,10 @@ void main() {
     float roughness = metallicRoughness.g;
 
     normal = normalize(normal * 2.0 - 1.0);
-    vec3 lightDir = normalize(tangentLightPos - tangentPos);
-    vec3 viewDir = normalize(tangentCamPos - tangentPos);
-    vec3 halfway = normalize(viewDir + lightDir );
-    float dist = length(tangentLightPos - tangentPos);
+    vec3 lightDir = normalize(tangentLightDir);
+    vec3 viewDir = normalize(tangentViewDir);
+    vec3 halfway = normalize(viewDir + lightDir);
+    float dist = lightDistance;
     float attenuation = 1.0 / (dist * dist);
     vec3 radiance = lightColor * attenuation;
 
@@ -71,7 +85,13 @@ void main() {
     kD *= 1.0 - metallic;
     vec3 specular = (ndf * g * f) / (4.0 * maxDot(normal, viewDir) * maxDot(normal, lightDir) + 0.0001);
     vec3 pbr = (kD * albedo / PI + specular) * radiance * maxDot(normal, lightDir);
-    vec3 ambient = vec3(0.01) * albedo;
+    vec3 ambient = vec3(0.05) * albedo;
+
+    bool res = trace_shadow_rays(lightPos, worldSpacePos);
+
+    float mod = res ? 0.1 : 1.0;
+
+    pbr *= mod;
 
     outColor = vec4(ambient + pbr, 1.0);
 }

@@ -21,7 +21,7 @@ itertools = "0.12"
 serde = { version = "1", features = ["derive"] }
 shaderc = "0.8"
 serde_json = "1.0"
-spirv_cross = { git = "https://github.com/vitorhnn/spirv_cross.git", features = ["glsl"] }
+spirv_cross = { package = "spv-cross", git = "https://github.com/NotAPenguin0/spirv_cross.git", features = ["glsl"] }
 bitflags = { version = "2.0.0-rc.1", features = ["serde"] }
 ron = "0.8.0"
 image = { version = "0.25.1", features = ["png"] }

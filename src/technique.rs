@@ -77,6 +77,7 @@ pub enum DescriptorType {
     SampledImage,
     StorageBuffer,
     StorageImage,
+    AccelerationStructure,
 }
 
 impl DescriptorType {
@@ -87,6 +88,7 @@ impl DescriptorType {
             Self::SampledImage => vk::DescriptorType::SAMPLED_IMAGE,
             Self::StorageBuffer => vk::DescriptorType::STORAGE_BUFFER,
             Self::StorageImage => vk::DescriptorType::STORAGE_IMAGE,
+            Self::AccelerationStructure => vk::DescriptorType::ACCELERATION_STRUCTURE_KHR,
         }
     }
 }
@@ -397,7 +399,15 @@ fn build_descriptor_set_layouts_for_stage(
         ast,
         &resources.storage_images,
         DescriptorType::StorageImage,
-    )
+    );
+    build_descriptor_set_layouts_for_descriptor_type(
+        sets,
+        sets_metadata,
+        stage,
+        ast,
+        &resources.acceleration_structures,
+        DescriptorType::AccelerationStructure,
+    );
 }
 
 fn parse_push_constant_for_stage(

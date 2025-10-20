@@ -1113,9 +1113,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "spirv_cross"
-version = "0.23.1"
-source = "git+https://github.com/vitorhnn/spirv_cross.git#98d0ea042e6acd98453a59952fd840cf735593db"
+name = "spv-cross"
+version = "0.23.5"
+source = "git+https://github.com/NotAPenguin0/spirv_cross.git#00b09c17ea3ea8307d1aad0112a588f9be2a1706"
 dependencies = [
  "cc",
  "js-sys",
@@ -1274,7 +1274,7 @@ dependencies = [
  "shaderc",
  "smallvec",
  "snafu",
- "spirv_cross",
+ "spv-cross",
 ]
 
 [[package]]

@@ -224,7 +224,7 @@ impl TonemapPass {
             // TODO: not hardcode the size of the images :)
             self.device
                 .inner
-                .cmd_dispatch(command_buffer, 1280 / 8, 720 / 8, 1);
+                .cmd_dispatch(command_buffer, 1920 / 8, 1080 / 8, 1);
         }
 
         Ok(())

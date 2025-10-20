@@ -80,7 +80,7 @@ fn load_texture(
                 .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
                 .initial_layout(vk::ImageLayout::UNDEFINED)
                 .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                .tiling(vk::ImageTiling::LINEAR),
+                .tiling(vk::ImageTiling::OPTIMAL),
             MemoryUsage::DeviceOnly,
         )
         .unwrap();
@@ -93,9 +93,12 @@ fn load_texture(
         texture,
         &vk::ImageViewCreateInfo::builder()
             .view_type(vk::ImageViewType::TYPE_2D)
-            // TODO: Check this. There's probably a good reason as to why you can specify different formats
-            // for the image and image view
-            .format(texture_asset.info.format.as_vk())
+            .format(if texture_asset.is_srgb {
+                // TODO: hardcoded. but works for now
+                vk::Format::R8G8B8A8_SRGB
+            } else {
+                texture_asset.info.format.as_vk()
+            })
             .components(vk::ComponentMapping::default())
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,

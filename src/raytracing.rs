@@ -13,6 +13,7 @@ pub struct RaytracingSupport {
     as_allocations: Vec<Allocation>,
     blas_addrs: Vec<u64>,
     tlas_addr: u64,
+    instance_bufs: Vec<Buffer>,
     pub tlas_handle: vk::AccelerationStructureKHR,
 }
 
@@ -28,9 +29,24 @@ fn addressify(bda: vk::DeviceAddress) -> vk::DeviceOrHostAddressKHR {
     }
 }
 
-fn khr_identity_matrix() -> vk::TransformMatrixKHR {
+fn convert_to_khr(matrix: glam::Mat4) -> vk::TransformMatrixKHR {
+    let transposed = matrix.transpose();
+
     vk::TransformMatrixKHR {
-        matrix: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+        matrix: [
+            transposed.x_axis.x,
+            transposed.x_axis.y,
+            transposed.x_axis.z,
+            transposed.x_axis.w,
+            transposed.y_axis.x,
+            transposed.y_axis.y,
+            transposed.y_axis.z,
+            transposed.y_axis.w,
+            transposed.z_axis.x,
+            transposed.z_axis.y,
+            transposed.z_axis.z,
+            transposed.z_axis.w,
+        ],
     }
 }
 
@@ -43,6 +59,7 @@ impl RaytracingSupport {
         as_bufs: &mut Vec<Buffer>,
         as_allocations: &mut Vec<Allocation>,
         blas_addrs: &mut Vec<u64>,
+        matrices: &mut Vec<vk::TransformMatrixKHR>,
     ) {
         let vtx_size = std::mem::size_of::<crate::loader::PosUvNormalTangentVertex>() as u64;
         for model in &world.models {
@@ -137,6 +154,7 @@ impl RaytracingSupport {
 
             as_bufs.push(buf);
             as_allocations.push(allocation);
+            matrices.push(convert_to_khr(model.transform));
 
             let acceleration_device_address_info =
                 vk::AccelerationStructureDeviceAddressInfoKHR::builder()
@@ -215,12 +233,13 @@ impl RaytracingSupport {
         allocator: &Allocator,
         cmd_buf: vk::CommandBuffer,
         blas_addrs: &Vec<u64>,
-    ) -> (u64, vk::AccelerationStructureKHR) {
+        matrices: &Vec<vk::TransformMatrixKHR>,
+    ) -> (u64, vk::AccelerationStructureKHR, Vec<Buffer>) {
         let mut geometries = Vec::with_capacity(blas_addrs.len());
         let mut geometry_ranges = Vec::with_capacity(blas_addrs.len());
         let mut bufs = Vec::with_capacity(blas_addrs.len());
-        dbg!(blas_addrs);
-        for addr in blas_addrs {
+        assert_eq!(blas_addrs.len(), matrices.len());
+        for (addr, mat) in blas_addrs.iter().zip(matrices) {
             let buffer_create_info = vk::BufferCreateInfo::builder()
                 .usage(
                     vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
@@ -241,7 +260,7 @@ impl RaytracingSupport {
             dbg!(*addr);
             unsafe {
                 *mem = vk::AccelerationStructureInstanceKHR {
-                    transform: khr_identity_matrix(),
+                    transform: *mat,
                     instance_custom_index_and_mask: vk::Packed24_8::new(0, 0xFF),
                     instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(
                         0, 0,
@@ -319,21 +338,13 @@ impl RaytracingSupport {
             .size(sizes.acceleration_structure_size)
             .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL);
 
+        bufs.push(buf);
+
         let acceleration_structure = unsafe {
             device
                 .acceleration_structure
                 .create_acceleration_structure(&as_create_info, None)
                 .expect("as creation failed")
-        };
-
-        let acceleration_device_address_info =
-            vk::AccelerationStructureDeviceAddressInfoKHR::builder()
-                .acceleration_structure(acceleration_structure);
-
-        let tlas_addr = unsafe {
-            device
-                .acceleration_structure
-                .get_acceleration_structure_device_address(&acceleration_device_address_info)
         };
 
         let scratch_buf_create_info = vk::BufferCreateInfo::builder()
@@ -363,7 +374,7 @@ impl RaytracingSupport {
                 .begin_command_buffer(
                     cmd_buf,
                     &vk::CommandBufferBeginInfo::builder()
-                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                        .flags(vk::CommandBufferUsageFlags::empty()),
                 )
                 .expect("failed to begin rt as build cmd buf");
 
@@ -386,20 +397,32 @@ impl RaytracingSupport {
             device
                 .inner
                 .queue_submit(device.graphics_queue.inner, &[*submit], vk::Fence::null())
-              f  .expect("rt as build queue submit failed");
+                .expect("rt as build queue submit failed");
             device
                 .inner
                 .queue_wait_idle(device.graphics_queue.inner)
                 .expect("as queue wait idle failed");
         }
 
-        (tlas_addr, acceleration_structure)
+        let acceleration_device_address_info =
+            vk::AccelerationStructureDeviceAddressInfoKHR::builder()
+                .acceleration_structure(acceleration_structure);
+
+        let tlas_addr = unsafe {
+            device
+                .acceleration_structure
+                .get_acceleration_structure_device_address(&acceleration_device_address_info)
+        };
+
+
+        (tlas_addr, acceleration_structure, bufs)
     }
 
     pub fn new(device: Rc<Device>, allocator: &Allocator, world: &World) -> Self {
         let mut as_bufs = Vec::new();
         let mut as_allocations = Vec::new();
         let mut blas_addrs = Vec::new();
+        let mut matrices = Vec::new();
         let cmd_buf = unsafe {
             device
                 .inner
@@ -420,9 +443,19 @@ impl RaytracingSupport {
             &mut as_bufs,
             &mut as_allocations,
             &mut blas_addrs,
+            &mut matrices,
         );
 
-        let (tlas_addr, tlas_handle) = Self::build_tlas(&device, allocator, cmd_buf, &blas_addrs);
+        unsafe {
+            device
+                .inner
+                .reset_command_buffer(cmd_buf, vk::CommandBufferResetFlags::RELEASE_RESOURCES)
+                .unwrap();
+        }
+
+        let (tlas_addr, tlas_handle, bufs) =
+            Self::build_tlas(&device, allocator, cmd_buf, &blas_addrs, &matrices);
+
 
         Self {
             as_bufs,
@@ -431,6 +464,7 @@ impl RaytracingSupport {
             blas_addrs,
             tlas_addr,
             tlas_handle,
+            instance_bufs: bufs,
         }
     }
 }

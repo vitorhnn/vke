@@ -537,8 +537,8 @@ fn result_msgbox<T, E: Debug>(result: Result<T, E>) -> Result<T, E> {
 fn main() -> Result<(), Box<dyn Error>> {
     let mut app = result_msgbox(Application::new(
         vk::Extent2D {
-            width: 1280,
-            height: 720,
+            width: 1920,
+            height: 1080,
         },
         vk::PresentModeKHR::FIFO,
     ))?;

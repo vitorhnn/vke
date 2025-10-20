@@ -9,8 +9,8 @@ use ash::extensions::khr::{
 };
 use ash::vk::{
     ExtDescriptorIndexingFn, KhrAccelerationStructureFn, KhrBufferDeviceAddressFn,
-    KhrDeferredHostOperationsFn, KhrDepthStencilResolveFn, Semaphore, SemaphoreCreateInfo,
-    SemaphoreType, SemaphoreTypeCreateInfo,
+    KhrDeferredHostOperationsFn, KhrDepthStencilResolveFn, KhrRayQueryFn, Semaphore,
+    SemaphoreCreateInfo, SemaphoreType, SemaphoreTypeCreateInfo,
 };
 use ash::{extensions::khr::Swapchain as KhrSwapchain, prelude::VkResult, vk, Device as VkDevice};
 
@@ -139,6 +139,7 @@ impl Device {
             KhrAccelerationStructureFn::name().as_ptr(),
             KhrBufferDeviceAddressFn::name().as_ptr(),
             KhrDeferredHostOperationsFn::name().as_ptr(),
+            KhrRayQueryFn::name().as_ptr(),
         ];
 
         let create_device_info_builder = vk::DeviceCreateInfo::builder()
